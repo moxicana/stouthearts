@@ -21,6 +21,33 @@
 }
 
 @layer components {
+  .flatpickr-calendar {
+    @apply border-zinc-300 bg-white text-zinc-900 shadow-lg dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100;
+  }
+
+  .flatpickr-day {
+    @apply text-zinc-900 dark:text-zinc-100;
+  }
+
+  .flatpickr-day:hover {
+    @apply bg-zinc-100 dark:bg-zinc-800;
+  }
+
+  .flatpickr-day.today {
+    @apply border-emerald-600 dark:border-emerald-400;
+  }
+
+  .flatpickr-day.selected,
+  .flatpickr-day.selected:hover {
+    @apply border-emerald-700 bg-emerald-700 text-white dark:border-emerald-500 dark:bg-emerald-500 dark:text-zinc-950;
+  }
+
+  .flatpickr-months .flatpickr-month,
+  .flatpickr-current-month .flatpickr-monthDropdown-months,
+  .flatpickr-current-month input.cur-year {
+    @apply text-zinc-900 dark:text-zinc-100;
+  }
+
   .panel {
     @apply rounded-2xl border border-zinc-200 bg-white p-4 shadow-sm dark:border-zinc-800 dark:bg-zinc-900;
   }

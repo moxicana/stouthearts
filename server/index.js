@@ -27,8 +27,8 @@ const CLIENT_ORIGINS = (
 const COOKIE_NAME = "bookclub_session";
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const SESSION_TTL_TOKEN = "7d";
-const CURRENT_SEASON = Number(process.env.CURRENT_SEASON || 2);
-const PAST_SEASON = Math.max(CURRENT_SEASON - 1, 1);
+const CURRENT_VOLUME = Number(process.env.CURRENT_VOLUME || process.env.CURRENT_SEASON || 2);
+const PAST_VOLUME = Math.max(CURRENT_VOLUME - 1, 1);
 const ALLOWED_ROLES = ["member", "admin"];
 const COVER_ENRICHMENT_ENABLED =
   String(process.env.COVER_ENRICHMENT_ENABLED || "true").trim().toLowerCase() !== "false";
@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS users (
   email TEXT NOT NULL UNIQUE,
   password_hash TEXT NOT NULL,
   role TEXT NOT NULL DEFAULT 'member',
+  is_approved INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL
 );
 
@@ -61,11 +62,13 @@ CREATE TABLE IF NOT EXISTS books (
   id TEXT PRIMARY KEY,
   user_id INTEGER NOT NULL,
   year INTEGER NOT NULL,
-  season INTEGER NOT NULL DEFAULT 1,
+  volume INTEGER NOT NULL DEFAULT 1,
   title TEXT NOT NULL,
   author TEXT NOT NULL,
   isbn TEXT,
   month TEXT NOT NULL,
+  meeting_starts_at TEXT,
+  meeting_location TEXT,
   thumbnail_url TEXT,
   resources_json TEXT NOT NULL DEFAULT '[]',
   is_featured INTEGER NOT NULL DEFAULT 0,
@@ -97,10 +100,16 @@ CREATE TABLE IF NOT EXISTS reading_list_uploads (
 `);
 
 ensureColumnExists("users", "role", "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'member'");
-const addedSeasonColumn = ensureColumnExists(
+const addedApprovalColumn = ensureColumnExists(
+  "users",
+  "is_approved",
+  "ALTER TABLE users ADD COLUMN is_approved INTEGER NOT NULL DEFAULT 0"
+);
+const hasLegacySeasonColumn = tableHasColumn("books", "season");
+const addedVolumeColumn = ensureColumnExists(
   "books",
-  "season",
-  "ALTER TABLE books ADD COLUMN season INTEGER NOT NULL DEFAULT 1"
+  "volume",
+  "ALTER TABLE books ADD COLUMN volume INTEGER NOT NULL DEFAULT 1"
 );
 ensureColumnExists("books", "thumbnail_url", "ALTER TABLE books ADD COLUMN thumbnail_url TEXT");
 ensureColumnExists(
@@ -109,34 +118,49 @@ ensureColumnExists(
   "ALTER TABLE books ADD COLUMN resources_json TEXT NOT NULL DEFAULT '[]'"
 );
 ensureColumnExists("books", "isbn", "ALTER TABLE books ADD COLUMN isbn TEXT");
+ensureColumnExists("books", "meeting_starts_at", "ALTER TABLE books ADD COLUMN meeting_starts_at TEXT");
+ensureColumnExists("books", "meeting_location", "ALTER TABLE books ADD COLUMN meeting_location TEXT");
 db.prepare(
   "UPDATE users SET role = 'member' WHERE role NOT IN ('member', 'admin') OR role IS NULL"
 ).run();
-const BASE_LEGACY_YEAR = new Date().getFullYear() - (CURRENT_SEASON - 1);
-if (addedSeasonColumn) {
-  // One-time legacy backfill only when the season column is first introduced.
-  db.prepare(
+if (addedApprovalColumn) {
+  // Preserve access for existing accounts when introducing approval gating.
+  db.prepare("UPDATE users SET is_approved = 1").run();
+}
+db.prepare("UPDATE users SET is_approved = 1 WHERE role = 'admin'").run();
+db.prepare("UPDATE users SET is_approved = 0 WHERE is_approved IS NULL").run();
+const BASE_LEGACY_YEAR = new Date().getFullYear() - (CURRENT_VOLUME - 1);
+if (addedVolumeColumn) {
+  if (hasLegacySeasonColumn) {
+    // Preserve historical grouping when migrating from the legacy `season` column.
+    db.prepare("UPDATE books SET volume = season WHERE season IS NOT NULL").run();
+  } else {
+    // Legacy fallback when no season column exists: infer volume from year.
+    db.prepare(
+      `
+      UPDATE books
+      SET volume = CASE
+        WHEN year >= ? THEN year - ? + 1
+        ELSE 1
+      END
     `
-    UPDATE books
-    SET season = CASE
-      WHEN year >= ? THEN year - ? + 1
-      ELSE 1
-    END
-  `
-  ).run(BASE_LEGACY_YEAR, BASE_LEGACY_YEAR);
+    ).run(BASE_LEGACY_YEAR, BASE_LEGACY_YEAR);
+  }
 }
 db.prepare(
   `
   UPDATE books
-  SET season = CASE
+  SET volume = CASE
     WHEN year >= ? THEN year - ? + 1
     ELSE 1
   END
-  WHERE season IS NULL OR season < 1
+  WHERE volume IS NULL OR volume < 1
 `
 ).run(BASE_LEGACY_YEAR, BASE_LEGACY_YEAR);
 db.exec("CREATE INDEX IF NOT EXISTS idx_users_role ON users(role)");
-db.exec("CREATE INDEX IF NOT EXISTS idx_books_user_season ON books(user_id, season)");
+db.exec("CREATE INDEX IF NOT EXISTS idx_users_approval ON users(is_approved)");
+db.exec("CREATE INDEX IF NOT EXISTS idx_books_user_volume ON books(user_id, volume)");
+db.exec("CREATE INDEX IF NOT EXISTS idx_books_meeting_starts_at ON books(meeting_starts_at)");
 
 app.disable("x-powered-by");
 app.use(helmet());
@@ -195,7 +219,7 @@ const commentSchema = z.object({
 });
 
 const readingListModeSchema = z.enum(["append", "replace"]);
-const uploadSeasonSchema = z.preprocess(
+const uploadVolumeSchema = z.preprocess(
   (value) => {
     if (value === undefined || value === null || value === "") return undefined;
     const numeric = Number(value);
@@ -203,20 +227,43 @@ const uploadSeasonSchema = z.preprocess(
   },
   z.number().int().min(1).max(99).optional()
 );
-const clearSeasonSchema = z.object({
-  season: z.coerce.number().int().min(1).max(99)
+const clearVolumeSchema = z.object({
+  volume: z.coerce.number().int().min(1).max(99)
+});
+const pendingUserIdSchema = z.object({
+  userId: z.coerce.number().int().min(1)
+});
+const featureBookParamsSchema = z.object({
+  bookId: z.string().trim().min(1).max(120)
+});
+const bookMeetingSchema = z.object({
+  startsAt: z
+    .string()
+    .trim()
+    .refine((value) => !Number.isNaN(new Date(value).getTime()), {
+      message: "A valid meeting date and time is required."
+    }),
+  location: z.string().trim().min(1).max(160)
 });
 const resourceLinkSchema = z.object({
   label: z.string().trim().min(1).max(80),
   url: z.string().trim().url().max(500)
 });
 const readingListRowSchema = z.object({
-  season: z.coerce.number().int().min(1).max(99),
+  volume: z.coerce.number().int().min(1).max(99),
   year: z.coerce.number().int().min(1900).max(2100).optional(),
   title: z.string().trim().min(1).max(200),
   author: z.string().trim().min(1).max(160),
   isbn: z.string().regex(/^(?:\d{9}[\dX]|\d{13})$/).optional(),
   month: z.string().trim().min(1).max(30),
+  meetingStartsAt: z
+    .string()
+    .trim()
+    .refine((value) => !Number.isNaN(new Date(value).getTime()), {
+      message: "meetingStartsAt must be a valid date/time."
+    })
+    .optional(),
+  meetingLocation: z.string().trim().max(160).optional(),
   thumbnailUrl: z.string().trim().url().max(500).optional(),
   resources: z.array(resourceLinkSchema).max(12).optional(),
   isFeatured: z.boolean()
@@ -255,7 +302,19 @@ function requireAuth(req, res, next) {
 
   try {
     const payload = jwt.verify(token, JWT_SECRET);
-    req.userId = Number(payload.sub);
+    const userId = Number(payload.sub);
+    const user = db
+      .prepare("SELECT id, is_approved AS isApproved FROM users WHERE id = ?")
+      .get(userId);
+    if (!user) {
+      clearSessionCookie(res);
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+    if (!Boolean(user.isApproved)) {
+      clearSessionCookie(res);
+      return res.status(403).json({ error: "Your account is pending admin approval." });
+    }
+    req.userId = userId;
     return next();
   } catch {
     clearSessionCookie(res);
@@ -265,10 +324,16 @@ function requireAuth(req, res, next) {
 
 function requireRole(role) {
   return (req, res, next) => {
-    const user = db.prepare("SELECT id, role FROM users WHERE id = ?").get(req.userId);
+    const user = db
+      .prepare("SELECT id, role, is_approved AS isApproved FROM users WHERE id = ?")
+      .get(req.userId);
     if (!user) {
       clearSessionCookie(res);
       return res.status(401).json({ error: "Unauthorized" });
+    }
+    if (!Boolean(user.isApproved)) {
+      clearSessionCookie(res);
+      return res.status(403).json({ error: "Your account is pending admin approval." });
     }
     if (user.role !== role) {
       return res.status(403).json({ error: "Forbidden" });
@@ -283,7 +348,8 @@ function formatUser(user) {
     id: user.id,
     name: user.name,
     email: user.email,
-    role: user.role
+    role: user.role,
+    isApproved: Boolean(user.isApproved ?? user.is_approved)
   };
 }
 
@@ -291,26 +357,26 @@ function syncAdminRoleForConfiguredEmail(user) {
   if (!ADMIN_EMAIL) return user;
   if (!user?.email) return user;
   if (user.email.toLowerCase() !== ADMIN_EMAIL) return user;
-  if (user.role === "admin") return user;
+  if (user.role === "admin" && Boolean(user.isApproved ?? user.is_approved)) return user;
 
-  db.prepare("UPDATE users SET role = 'admin' WHERE id = ?").run(user.id);
-  return { ...user, role: "admin" };
+  db.prepare("UPDATE users SET role = 'admin', is_approved = 1 WHERE id = ?").run(user.id);
+  return { ...user, role: "admin", isApproved: true };
 }
 
-function seasonToLegacyYear(season) {
-  return BASE_LEGACY_YEAR + Number(season) - 1;
+function volumeToLegacyYear(volume) {
+  return BASE_LEGACY_YEAR + Number(volume) - 1;
 }
 
-function legacyYearToSeason(year) {
-  const season = Number(year) - BASE_LEGACY_YEAR + 1;
-  if (!Number.isFinite(season)) return 1;
-  return Math.max(1, season);
+function legacyYearToVolume(year) {
+  const volume = Number(year) - BASE_LEGACY_YEAR + 1;
+  if (!Number.isFinite(volume)) return 1;
+  return Math.max(1, volume);
 }
 
 function seedBooksForUser(userId) {
   const bookInsert = db.prepare(`
-    INSERT INTO books (id, user_id, year, season, title, author, month, is_featured, created_at)
-    VALUES (@id, @user_id, @year, @season, @title, @author, @month, @is_featured, @created_at)
+    INSERT INTO books (id, user_id, year, volume, title, author, month, is_featured, created_at)
+    VALUES (@id, @user_id, @year, @volume, @title, @author, @month, @is_featured, @created_at)
   `);
 
   const commentInsert = db.prepare(`
@@ -319,7 +385,7 @@ function seedBooksForUser(userId) {
   `);
 
   const seeds = {
-    [CURRENT_SEASON]: [
+    [CURRENT_VOLUME]: [
       {
         title: "The Ministry for the Future",
         author: "Kim Stanley Robinson",
@@ -356,13 +422,13 @@ function seedBooksForUser(userId) {
         comments: []
       }
     ],
-    [PAST_SEASON]: [
+    [PAST_VOLUME]: [
       {
         title: "Station Eleven",
         author: "Emily St. John Mandel",
         month: "January",
         isFeatured: 0,
-        comments: ["One of our highest-rated books from last season."]
+        comments: ["One of our highest-rated books from last volume."]
       },
       {
         title: "The Nickel Boys",
@@ -382,15 +448,15 @@ function seedBooksForUser(userId) {
   };
 
   const insertSeedData = db.transaction(() => {
-    for (const [season, books] of Object.entries(seeds)) {
+    for (const [volume, books] of Object.entries(seeds)) {
       for (const book of books) {
         const bookId = randomUUID();
         const createdAt = new Date().toISOString();
         bookInsert.run({
           id: bookId,
           user_id: userId,
-          year: seasonToLegacyYear(Number(season)),
-          season: Number(season),
+          year: volumeToLegacyYear(Number(volume)),
+          volume: Number(volume),
           title: book.title,
           author: book.author,
           month: book.month,
@@ -420,12 +486,14 @@ function getBooksPayload(userId) {
       `
       SELECT
         id,
-        season,
+        volume,
         year,
         title,
         author,
         isbn,
         month,
+        meeting_starts_at AS meetingStartsAt,
+        meeting_location AS meetingLocation,
         thumbnail_url AS thumbnailUrl,
         resources_json AS resourcesJson,
         is_featured AS isFeatured,
@@ -447,7 +515,7 @@ function getBooksPayload(userId) {
         END AS monthOrder
       FROM books
       WHERE user_id = ?
-      ORDER BY season DESC, year DESC, monthOrder DESC, created_at DESC
+      ORDER BY volume DESC, year ASC, monthOrder ASC, created_at ASC
     `
     )
     .all(userId);
@@ -455,10 +523,11 @@ function getBooksPayload(userId) {
   const comments = db
     .prepare(
       `
-      SELECT id, book_id AS bookId, text, created_at AS createdAt
-      FROM comments
-      WHERE user_id = ?
-      ORDER BY created_at DESC
+      SELECT c.id, c.book_id AS bookId, c.text, c.created_at AS createdAt, u.name AS authorName
+      FROM comments c
+      INNER JOIN users u ON u.id = c.user_id
+      WHERE c.user_id = ?
+      ORDER BY c.created_at DESC
     `
     )
     .all(userId);
@@ -468,6 +537,7 @@ function getBooksPayload(userId) {
     acc[comment.bookId].push({
       id: comment.id,
       text: comment.text,
+      authorName: comment.authorName,
       createdAt: comment.createdAt
     });
     return acc;
@@ -475,59 +545,172 @@ function getBooksPayload(userId) {
 
   const withComments = books.map((book) => ({
     id: book.id,
-    season: book.season,
+    volume: book.volume,
     year: book.year,
     title: book.title,
     author: book.author,
     isbn: book.isbn || null,
     month: book.month,
+    meetingStartsAt: book.meetingStartsAt || null,
+    meetingLocation: book.meetingLocation || "",
     thumbnailUrl: book.thumbnailUrl || null,
     resources: parseResourcesJson(book.resourcesJson),
     isFeatured: Boolean(book.isFeatured),
     comments: commentsByBookId[book.id] || []
   }));
-  const stripSeason = ({ season, ...book }) => book;
-  const seasonsByNumber = withComments
+  const stripVolume = ({ volume, ...book }) => book;
+  const volumesByNumber = withComments
     .reduce((acc, book) => {
-      if (!acc[book.season]) acc[book.season] = [];
-      acc[book.season].push(stripSeason(book));
+      if (!acc[book.volume]) acc[book.volume] = [];
+      acc[book.volume].push(stripVolume(book));
       return acc;
     }, {});
-  if (!seasonsByNumber[CURRENT_SEASON]) seasonsByNumber[CURRENT_SEASON] = [];
-  if (!seasonsByNumber[PAST_SEASON]) seasonsByNumber[PAST_SEASON] = [];
-  const seasons = Object.entries(seasonsByNumber)
-    .map(([season, seasonBooks]) => ({
-      season: Number(season),
-      books: seasonBooks
+  if (!volumesByNumber[CURRENT_VOLUME]) volumesByNumber[CURRENT_VOLUME] = [];
+  if (!volumesByNumber[PAST_VOLUME]) volumesByNumber[PAST_VOLUME] = [];
+  const volumes = Object.entries(volumesByNumber)
+    .map(([volume, volumeBooks]) => ({
+      volume: Number(volume),
+      books: volumeBooks
     }))
-    .sort((a, b) => b.season - a.season);
-  const pastSeasons = seasons.filter((group) => group.season !== CURRENT_SEASON);
+    .sort((a, b) => b.volume - a.volume);
+  const pastVolumes = volumes.filter((group) => group.volume !== CURRENT_VOLUME);
 
   return {
-    currentSeason: CURRENT_SEASON,
-    pastSeason: PAST_SEASON,
-    seasons,
+    currentVolume: CURRENT_VOLUME,
+    pastVolume: PAST_VOLUME,
+    volumes,
     currentBooks: withComments
-      .filter((book) => book.season === CURRENT_SEASON)
-      .map(stripSeason),
+      .filter((book) => book.volume === CURRENT_VOLUME)
+      .map(stripVolume),
     pastBooks: withComments
-      .filter((book) => book.season === PAST_SEASON)
-      .map(stripSeason),
-    pastSeasons,
+      .filter((book) => book.volume === PAST_VOLUME)
+      .map(stripVolume),
+    pastVolumes,
     otherBooks: withComments
-      .filter((book) => book.season !== CURRENT_SEASON && book.season !== PAST_SEASON)
-      .map(stripSeason)
+      .filter((book) => book.volume !== CURRENT_VOLUME && book.volume !== PAST_VOLUME)
+      .map(stripVolume)
+  };
+}
+
+function listBookMeetings(volume) {
+  return db
+    .prepare(
+      `
+      SELECT
+        MIN(id) AS id,
+        volume,
+        title,
+        author,
+        meeting_starts_at AS startsAt,
+        meeting_location AS location
+      FROM books
+      WHERE meeting_starts_at IS NOT NULL
+        AND trim(meeting_starts_at) != ''
+        AND volume = ?
+      GROUP BY volume, lower(title), lower(author)
+      ORDER BY meeting_starts_at ASC, lower(title) ASC
+    `
+    )
+    .all(volume);
+}
+
+function getMembersPayload() {
+  const rows = db
+    .prepare(
+      `
+      SELECT
+        u.id,
+        u.name,
+        u.role,
+        u.created_at AS createdAt,
+        COUNT(c.id) AS commentsCount
+      FROM users u
+      LEFT JOIN comments c ON c.user_id = u.id
+      WHERE u.is_approved = 1
+      GROUP BY u.id, u.name, u.role, u.created_at
+      ORDER BY lower(u.name) ASC
+    `
+    )
+    .all();
+  return rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    role: row.role,
+    createdAt: row.createdAt,
+    commentsCount: Number(row.commentsCount || 0)
+  }));
+}
+
+function getDashboardPayload() {
+  const booksRead = db
+    .prepare(
+      `
+      SELECT COUNT(*) AS count
+      FROM (
+        SELECT volume, lower(title), lower(author)
+        FROM books
+        GROUP BY volume, lower(title), lower(author)
+      )
+    `
+    )
+    .get().count;
+  const currentVolumeBooks = db
+    .prepare(
+      `
+      SELECT COUNT(*) AS count
+      FROM (
+        SELECT lower(title), lower(author)
+        FROM books
+        WHERE volume = ?
+        GROUP BY lower(title), lower(author)
+      )
+    `
+    )
+    .get(CURRENT_VOLUME).count;
+  const activeMembers = db
+    .prepare("SELECT COUNT(*) AS count FROM users WHERE is_approved = 1")
+    .get().count;
+  const discussions = db.prepare("SELECT COUNT(*) AS count FROM comments").get().count;
+  const upcomingEvents = db
+    .prepare(
+      `
+      SELECT COUNT(*) AS count
+      FROM (
+        SELECT volume, lower(title), lower(author)
+        FROM books
+        WHERE meeting_starts_at IS NOT NULL
+          AND trim(meeting_starts_at) != ''
+          AND meeting_starts_at >= ?
+        GROUP BY volume, lower(title), lower(author)
+      )
+    `
+    )
+    .get(new Date().toISOString()).count;
+
+  return {
+    stats: {
+      booksRead: Number(booksRead || 0),
+      activeMembers: Number(activeMembers || 0),
+      discussions: Number(discussions || 0),
+      upcomingEvents: Number(upcomingEvents || 0),
+      currentVolumeBooks: Number(currentVolumeBooks || 0)
+    },
+    members: getMembersPayload(),
+    schedule: listBookMeetings(CURRENT_VOLUME)
   };
 }
 
 function ensureColumnExists(tableName, columnName, alterStatement) {
-  const columns = db.prepare(`PRAGMA table_info(${tableName})`).all();
-  const hasColumn = columns.some((column) => column.name === columnName);
-  if (!hasColumn) {
+  if (!tableHasColumn(tableName, columnName)) {
     db.exec(alterStatement);
     return true;
   }
   return false;
+}
+
+function tableHasColumn(tableName, columnName) {
+  const columns = db.prepare(`PRAGMA table_info(${tableName})`).all();
+  return columns.some((column) => column.name === columnName);
 }
 
 function parseBooleanLike(value) {
@@ -544,6 +727,15 @@ function parseOptionalNumber(value) {
   if (value === undefined || value === null || value === "") return undefined;
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric : undefined;
+}
+
+function parseOptionalDateTime(value) {
+  if (value === undefined || value === null) return undefined;
+  const trimmed = String(value).trim();
+  if (!trimmed) return undefined;
+  const parsed = new Date(trimmed);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed.toISOString();
 }
 
 function normalizeIsbn(value) {
@@ -808,7 +1000,7 @@ function parseResourcesJson(rawValue) {
   }
 }
 
-function parseReadingListRows(fileBuffer, fileName, mimeType, defaultSeason) {
+function parseReadingListRows(fileBuffer, fileName, mimeType, defaultVolume) {
   const isJsonFile =
     mimeType?.includes("application/json") || fileName.toLowerCase().endsWith(".json");
 
@@ -833,31 +1025,48 @@ function parseReadingListRows(fileBuffer, fileName, mimeType, defaultSeason) {
 
   return rawRows.map((row, index) => {
     const rawYear = parseOptionalNumber(getRowField(row, ["year", "Year"]));
-    const explicitSeason = parseOptionalNumber(getRowField(row, ["season", "Season"]));
-
-    let rawSeason = explicitSeason;
-    if (rawSeason === undefined && defaultSeason !== undefined) {
-      rawSeason = Number(defaultSeason);
+    const explicitVolume = parseOptionalNumber(
+      getRowField(row, ["volume", "Volume", "season", "Season"])
+    );
+    const meetingStartsAt = parseOptionalDateTime(
+      getRowField(row, [
+        "meetingStartsAt",
+        "meeting_starts_at",
+        "meetingDate",
+        "meeting_date",
+        "meetingDateTime",
+        "meeting_datetime"
+      ])
+    );
+    if (meetingStartsAt === null) {
+      throw new Error(`Invalid row ${index + 1}: meeting date must be a valid date/time.`);
     }
-    if (rawSeason === undefined) {
+
+    let rawVolume = explicitVolume;
+    if (rawVolume === undefined && defaultVolume !== undefined) {
+      rawVolume = Number(defaultVolume);
+    }
+    if (rawVolume === undefined) {
       throw new Error(
-        `Invalid row ${index + 1}: season is required (add a season column or choose a season in the Admin form).`
+        `Invalid row ${index + 1}: volume is required (add a volume column or choose a volume in the Admin form).`
       );
     }
 
     const normalizedYear =
       rawYear === undefined
-        ? rawSeason !== undefined
-          ? seasonToLegacyYear(Number(rawSeason))
+        ? rawVolume !== undefined
+          ? volumeToLegacyYear(Number(rawVolume))
           : undefined
         : Number(rawYear);
     const candidate = {
-      season: rawSeason,
+      volume: rawVolume,
       year: normalizedYear,
       title: getRowField(row, ["title", "Title"]),
       author: getRowField(row, ["author", "Author"]),
       isbn: normalizeIsbn(getRowField(row, ["isbn", "ISBN"])),
       month: getRowField(row, ["month", "Month"]),
+      meetingStartsAt,
+      meetingLocation: getRowField(row, ["meetingLocation", "meeting_location", "location"]),
       thumbnailUrl: coerceHttpUrl(
         getRowField(row, ["thumbnailUrl", "thumbnail_url", "thumbnail", "coverImage", "cover_image"])
       ),
@@ -875,17 +1084,17 @@ function parseReadingListRows(fileBuffer, fileName, mimeType, defaultSeason) {
 
 function applyReadingListToAllUsers(rows, mode) {
   const users = db.prepare("SELECT id FROM users").all();
-  const seasons = [...new Set(rows.map((row) => row.season))];
+  const volumes = [...new Set(rows.map((row) => row.volume))];
 
-  const deleteSeasonBooks = db.prepare("DELETE FROM books WHERE user_id = ? AND season = ?");
-  const clearFeaturedForSeason = db.prepare(
-    "UPDATE books SET is_featured = 0 WHERE user_id = ? AND season = ?"
+  const deleteVolumeBooks = db.prepare("DELETE FROM books WHERE user_id = ? AND volume = ?");
+  const clearFeaturedForVolume = db.prepare(
+    "UPDATE books SET is_featured = 0 WHERE user_id = ? AND volume = ?"
   );
   const findExistingBook = db.prepare(
     `
       SELECT id
       FROM books
-      WHERE user_id = ? AND season = ? AND lower(title) = lower(?) AND lower(author) = lower(?)
+      WHERE user_id = ? AND volume = ? AND lower(title) = lower(?) AND lower(author) = lower(?)
       LIMIT 1
     `
   );
@@ -895,17 +1104,19 @@ function applyReadingListToAllUsers(rows, mode) {
         id,
         user_id,
         year,
-        season,
+        volume,
         title,
         author,
         isbn,
         month,
+        meeting_starts_at,
+        meeting_location,
         thumbnail_url,
         resources_json,
         is_featured,
         created_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `
   );
   const updateBook = db.prepare(
@@ -913,12 +1124,14 @@ function applyReadingListToAllUsers(rows, mode) {
       UPDATE books
       SET
         month = ?,
+        meeting_starts_at = COALESCE(?, meeting_starts_at),
+        meeting_location = COALESCE(?, meeting_location),
         thumbnail_url = COALESCE(?, thumbnail_url),
         resources_json = COALESCE(?, resources_json),
         isbn = COALESCE(?, isbn),
         is_featured = ?,
         year = ?,
-        season = ?
+        volume = ?
       WHERE id = ? AND user_id = ?
     `
   );
@@ -929,26 +1142,28 @@ function applyReadingListToAllUsers(rows, mode) {
 
     for (const user of users) {
       if (mode === "replace") {
-        for (const season of seasons) {
-          deleteSeasonBooks.run(user.id, season);
+        for (const volume of volumes) {
+          deleteVolumeBooks.run(user.id, volume);
         }
       }
 
       for (const row of rows) {
         if (row.isFeatured) {
-          clearFeaturedForSeason.run(user.id, row.season);
+          clearFeaturedForVolume.run(user.id, row.volume);
         }
 
-        const existing = findExistingBook.get(user.id, row.season, row.title, row.author);
+        const existing = findExistingBook.get(user.id, row.volume, row.title, row.author);
         if (existing) {
           updateBook.run(
             row.month,
+            row.meetingStartsAt || null,
+            row.meetingLocation || null,
             row.thumbnailUrl || null,
             row.resources ? JSON.stringify(row.resources) : null,
             row.isbn || null,
             row.isFeatured ? 1 : 0,
-            row.year ?? seasonToLegacyYear(row.season),
-            row.season,
+            row.year ?? volumeToLegacyYear(row.volume),
+            row.volume,
             existing.id,
             user.id
           );
@@ -959,12 +1174,14 @@ function applyReadingListToAllUsers(rows, mode) {
         insertBook.run(
           randomUUID(),
           user.id,
-          row.year ?? seasonToLegacyYear(row.season),
-          row.season,
+          row.year ?? volumeToLegacyYear(row.volume),
+          row.volume,
           row.title,
           row.author,
           row.isbn || null,
           row.month,
+          row.meetingStartsAt || null,
+          row.meetingLocation || null,
           row.thumbnailUrl || null,
           JSON.stringify(row.resources || []),
           row.isFeatured ? 1 : 0,
@@ -980,19 +1197,146 @@ function applyReadingListToAllUsers(rows, mode) {
   return applyTransaction();
 }
 
-function clearSeasonForAllUsers(season) {
+function clearVolumeForAllUsers(volume) {
   const clearTransaction = db.transaction(() => {
     const usersAffected = db.prepare("SELECT COUNT(*) AS count FROM users").get().count;
-    const booksDeleted = db.prepare("SELECT COUNT(*) AS count FROM books WHERE season = ?").get(season).count;
-    db.prepare("DELETE FROM books WHERE season = ?").run(season);
+    const booksDeleted = db.prepare("SELECT COUNT(*) AS count FROM books WHERE volume = ?").get(volume).count;
+    db.prepare("DELETE FROM books WHERE volume = ?").run(volume);
     return {
-      season,
+      volume,
       usersAffected,
       booksDeleted
     };
   });
 
   return clearTransaction();
+}
+
+function featureBookForAllUsers(requestUserId, referenceBookId) {
+  const referenceBook = db
+    .prepare(
+      `
+      SELECT id, title, author, volume
+      FROM books
+      WHERE id = ? AND user_id = ?
+    `
+    )
+    .get(referenceBookId, requestUserId);
+  if (!referenceBook) {
+    return null;
+  }
+
+  const applyTransaction = db.transaction(() => {
+    const usersAffected = db.prepare("SELECT COUNT(*) AS count FROM users").get().count;
+    const unfeatured = db
+      .prepare("UPDATE books SET is_featured = 0 WHERE volume = ?")
+      .run(referenceBook.volume).changes;
+    const featured = db
+      .prepare(
+        `
+        UPDATE books
+        SET is_featured = 1
+        WHERE volume = ? AND lower(title) = lower(?) AND lower(author) = lower(?)
+      `
+      )
+      .run(referenceBook.volume, referenceBook.title, referenceBook.author).changes;
+
+    return {
+      usersAffected,
+      booksUnfeatured: unfeatured,
+      booksFeatured: featured,
+      volume: referenceBook.volume,
+      title: referenceBook.title,
+      author: referenceBook.author
+    };
+  });
+
+  return applyTransaction();
+}
+
+function assignMeetingForBookForAllUsers(requestUserId, referenceBookId, startsAt, location) {
+  const referenceBook = db
+    .prepare(
+      `
+      SELECT id, title, author, volume
+      FROM books
+      WHERE id = ? AND user_id = ?
+    `
+    )
+    .get(referenceBookId, requestUserId);
+  if (!referenceBook) {
+    return null;
+  }
+
+  const meetingStartsAt = new Date(startsAt).toISOString();
+  const applyTransaction = db.transaction(() => {
+    const usersAffected = db.prepare("SELECT COUNT(*) AS count FROM users").get().count;
+    const booksUpdated = db
+      .prepare(
+        `
+        UPDATE books
+        SET meeting_starts_at = ?, meeting_location = ?
+        WHERE volume = ? AND lower(title) = lower(?) AND lower(author) = lower(?)
+      `
+      )
+      .run(
+        meetingStartsAt,
+        location,
+        referenceBook.volume,
+        referenceBook.title,
+        referenceBook.author
+      ).changes;
+
+    return {
+      usersAffected,
+      booksUpdated,
+      volume: referenceBook.volume,
+      title: referenceBook.title,
+      author: referenceBook.author,
+      meetingStartsAt,
+      meetingLocation: location
+    };
+  });
+
+  return applyTransaction();
+}
+
+function clearMeetingForBookForAllUsers(requestUserId, referenceBookId) {
+  const referenceBook = db
+    .prepare(
+      `
+      SELECT id, title, author, volume
+      FROM books
+      WHERE id = ? AND user_id = ?
+    `
+    )
+    .get(referenceBookId, requestUserId);
+  if (!referenceBook) {
+    return null;
+  }
+
+  const applyTransaction = db.transaction(() => {
+    const usersAffected = db.prepare("SELECT COUNT(*) AS count FROM users").get().count;
+    const booksUpdated = db
+      .prepare(
+        `
+        UPDATE books
+        SET meeting_starts_at = NULL, meeting_location = NULL
+        WHERE volume = ? AND lower(title) = lower(?) AND lower(author) = lower(?)
+      `
+      )
+      .run(referenceBook.volume, referenceBook.title, referenceBook.author).changes;
+
+    return {
+      usersAffected,
+      booksUpdated,
+      volume: referenceBook.volume,
+      title: referenceBook.title,
+      author: referenceBook.author
+    };
+  });
+
+  return applyTransaction();
 }
 
 app.get("/api/health", (_req, res) => {
@@ -1015,17 +1359,26 @@ app.post("/api/auth/register", authLimiter, async (req, res) => {
 
   const now = new Date().toISOString();
   const insertUser = db.prepare(
-    "INSERT INTO users (name, email, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)"
+    "INSERT INTO users (name, email, password_hash, role, is_approved, created_at) VALUES (?, ?, ?, ?, ?, ?)"
   );
 
   try {
     const userCount = db.prepare("SELECT COUNT(*) AS count FROM users").get().count;
     const role =
       userCount === 0 || (ADMIN_EMAIL && ADMIN_EMAIL === email) ? "admin" : ALLOWED_ROLES[0];
-    const result = insertUser.run(name, email, passwordHash, role, now);
+    const isApproved = role === "admin";
+    const result = insertUser.run(name, email, passwordHash, role, isApproved ? 1 : 0, now);
     const userId = Number(result.lastInsertRowid);
     seedBooksForUser(userId);
-    const user = db.prepare("SELECT id, name, email, role FROM users WHERE id = ?").get(userId);
+    const user = db
+      .prepare("SELECT id, name, email, role, is_approved AS isApproved FROM users WHERE id = ?")
+      .get(userId);
+    if (!isApproved) {
+      return res.status(201).json({
+        requiresApproval: true,
+        message: "Account created. An admin must approve your account before you can sign in."
+      });
+    }
     const token = createSessionToken(user);
     setSessionCookie(res, token);
     return res.status(201).json({ user: formatUser(user) });
@@ -1045,7 +1398,9 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
 
   const { email, password } = parsed.data;
   let user = db
-    .prepare("SELECT id, name, email, role, password_hash AS passwordHash FROM users WHERE email = ?")
+    .prepare(
+      "SELECT id, name, email, role, is_approved AS isApproved, password_hash AS passwordHash FROM users WHERE email = ?"
+    )
     .get(email);
 
   if (!user) {
@@ -1058,6 +1413,10 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
   }
 
   user = syncAdminRoleForConfiguredEmail(user);
+  if (!Boolean(user.isApproved)) {
+    clearSessionCookie(res);
+    return res.status(403).json({ error: "Your account is pending admin approval." });
+  }
   const token = createSessionToken(user);
   setSessionCookie(res, token);
   return res.json({ user: formatUser(user) });
@@ -1069,7 +1428,9 @@ app.post("/api/auth/logout", requireAuth, (req, res) => {
 });
 
 app.get("/api/auth/me", requireAuth, (req, res) => {
-  let user = db.prepare("SELECT id, name, email, role FROM users WHERE id = ?").get(req.userId);
+  let user = db
+    .prepare("SELECT id, name, email, role, is_approved AS isApproved FROM users WHERE id = ?")
+    .get(req.userId);
   if (!user) {
     clearSessionCookie(res);
     return res.status(401).json({ error: "Unauthorized" });
@@ -1078,9 +1439,65 @@ app.get("/api/auth/me", requireAuth, (req, res) => {
   return res.json({ user: formatUser(user) });
 });
 
+app.get(
+  "/api/admin/users/pending",
+  requireAuth,
+  requireRole("admin"),
+  adminLimiter,
+  (_req, res) => {
+    const users = db
+      .prepare(
+        `
+        SELECT id, name, email, created_at AS createdAt
+        FROM users
+        WHERE is_approved = 0
+        ORDER BY created_at ASC
+      `
+      )
+      .all();
+    return res.json({ users });
+  }
+);
+
+app.post(
+  "/api/admin/users/:userId/approve",
+  requireAuth,
+  requireRole("admin"),
+  adminLimiter,
+  (req, res) => {
+    const parsed = pendingUserIdSchema.safeParse(req.params);
+    if (!parsed.success) {
+      return res.status(400).json({ error: "Invalid user id." });
+    }
+
+    const user = db
+      .prepare("SELECT id, name, email, role, is_approved AS isApproved FROM users WHERE id = ?")
+      .get(parsed.data.userId);
+    if (!user) {
+      return res.status(404).json({ error: "User not found." });
+    }
+
+    db.prepare("UPDATE users SET is_approved = 1 WHERE id = ?").run(parsed.data.userId);
+    return res.json({
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        isApproved: true
+      }
+    });
+  }
+);
+
 app.get("/api/books", requireAuth, (req, res) => {
   const payload = getBooksPayload(req.userId);
   res.json(payload);
+});
+
+app.get("/api/dashboard", requireAuth, (_req, res) => {
+  const payload = getDashboardPayload();
+  return res.json(payload);
 });
 
 app.post("/api/books/:bookId/comments", requireAuth, (req, res) => {
@@ -1100,6 +1517,7 @@ app.post("/api/books/:bookId/comments", requireAuth, (req, res) => {
 
   const id = randomUUID();
   const createdAt = new Date().toISOString();
+  const author = db.prepare("SELECT name FROM users WHERE id = ?").get(req.userId);
   db.prepare(
     "INSERT INTO comments (id, user_id, book_id, text, created_at) VALUES (?, ?, ?, ?, ?)"
   ).run(id, req.userId, bookId, parsed.data.text, createdAt);
@@ -1108,10 +1526,87 @@ app.post("/api/books/:bookId/comments", requireAuth, (req, res) => {
     comment: {
       id,
       text: parsed.data.text,
+      authorName: author?.name || "Unknown",
       createdAt
     }
   });
 });
+
+app.post(
+  "/api/admin/books/:bookId/feature",
+  requireAuth,
+  requireRole("admin"),
+  adminLimiter,
+  (req, res) => {
+    const parsed = featureBookParamsSchema.safeParse(req.params);
+    if (!parsed.success) {
+      return res.status(400).json({ error: "Invalid book id." });
+    }
+
+    const summary = featureBookForAllUsers(req.userId, parsed.data.bookId);
+    if (!summary) {
+      return res.status(404).json({ error: "Book not found." });
+    }
+
+    return res.json({
+      summary,
+      book: {
+        title: summary.title,
+        author: summary.author,
+        volume: summary.volume
+      }
+    });
+  }
+);
+
+app.put(
+  "/api/admin/books/:bookId/meeting",
+  requireAuth,
+  requireRole("admin"),
+  adminLimiter,
+  (req, res) => {
+    const parsedParams = featureBookParamsSchema.safeParse(req.params);
+    if (!parsedParams.success) {
+      return res.status(400).json({ error: "Invalid book id." });
+    }
+    const parsedBody = bookMeetingSchema.safeParse(req.body);
+    if (!parsedBody.success) {
+      return res.status(400).json({ error: parsedBody.error.issues[0]?.message || "Invalid meeting data." });
+    }
+
+    const summary = assignMeetingForBookForAllUsers(
+      req.userId,
+      parsedParams.data.bookId,
+      parsedBody.data.startsAt,
+      parsedBody.data.location
+    );
+    if (!summary) {
+      return res.status(404).json({ error: "Book not found." });
+    }
+
+    return res.json({ summary });
+  }
+);
+
+app.delete(
+  "/api/admin/books/:bookId/meeting",
+  requireAuth,
+  requireRole("admin"),
+  adminLimiter,
+  (req, res) => {
+    const parsed = featureBookParamsSchema.safeParse(req.params);
+    if (!parsed.success) {
+      return res.status(400).json({ error: "Invalid book id." });
+    }
+
+    const summary = clearMeetingForBookForAllUsers(req.userId, parsed.data.bookId);
+    if (!summary) {
+      return res.status(404).json({ error: "Book not found." });
+    }
+
+    return res.status(204).end();
+  }
+);
 
 app.post(
   "/api/admin/reading-list/upload",
@@ -1128,9 +1623,9 @@ app.post(
     if (!parsedMode.success) {
       return res.status(400).json({ error: "Mode must be append or replace." });
     }
-    const parsedSeason = uploadSeasonSchema.safeParse(req.body?.season);
-    if (!parsedSeason.success) {
-      return res.status(400).json({ error: "Season must be between 1 and 99." });
+    const parsedVolume = uploadVolumeSchema.safeParse(req.body?.volume ?? req.body?.season);
+    if (!parsedVolume.success) {
+      return res.status(400).json({ error: "Volume must be between 1 and 99." });
     }
 
     try {
@@ -1138,7 +1633,7 @@ app.post(
         req.file.buffer,
         req.file.originalname,
         req.file.mimetype,
-        parsedSeason.data
+        parsedVolume.data
       );
       const enrichedRows = await enrichRowsWithCovers(rows);
       const summary = applyReadingListToAllUsers(enrichedRows, parsedMode.data);
@@ -1165,17 +1660,17 @@ app.post(
 );
 
 app.post(
-  "/api/admin/reading-list/clear-season",
+  "/api/admin/reading-list/clear-volume",
   requireAuth,
   requireRole("admin"),
   adminLimiter,
   (req, res) => {
-    const parsed = clearSeasonSchema.safeParse(req.body);
+    const parsed = clearVolumeSchema.safeParse(req.body);
     if (!parsed.success) {
-      return res.status(400).json({ error: "Season must be between 1 and 99." });
+      return res.status(400).json({ error: "Volume must be between 1 and 99." });
     }
 
-    const summary = clearSeasonForAllUsers(parsed.data.season);
+    const summary = clearVolumeForAllUsers(parsed.data.volume);
     db.prepare(
       `
       INSERT INTO reading_list_uploads (id, admin_user_id, filename, mode, rows_imported, created_at)
@@ -1184,7 +1679,7 @@ app.post(
     ).run(
       randomUUID(),
       req.userId,
-      `clear-season-${parsed.data.season}`,
+      `clear-volume-${parsed.data.volume}`,
       "clear",
       summary.booksDeleted,
       new Date().toISOString()
@@ -1239,6 +1734,23 @@ app.get(
       )
       .all();
     res.json({ uploads });
+  }
+);
+
+app.post(
+  "/api/admin/reading-list/uploads/clear",
+  requireAuth,
+  requireRole("admin"),
+  adminLimiter,
+  (_req, res) => {
+    const clearTransaction = db.transaction(() => {
+      const uploadsDeleted = db.prepare("SELECT COUNT(*) AS count FROM reading_list_uploads").get().count;
+      db.prepare("DELETE FROM reading_list_uploads").run();
+      return { uploadsDeleted };
+    });
+
+    const summary = clearTransaction();
+    return res.json({ summary });
   }
 );
 

@@ -11,7 +11,7 @@ Vue + Tailwind app with an Express API for secure authentication and per-user bo
   - `helmet` headers and auth rate limiting
   - input validation via `zod`
 - SQLite persistence for users, books, and comments
-- Seeded example books for current season and past season per new account
+- Seeded example books for current volume and past volume per new account
 - Role-based access:
   - `admin` can upload reading lists
   - `member` can view books and add comments
@@ -55,18 +55,18 @@ npm run build
 
 Admins can open the `Admin` page in the app and upload `.csv` or `.json` reading list files.
 
-- Clear season:
-  - `Clear Season` in the Admin page deletes all books (and related comments) for the selected season across all users.
-  - Use this before a new import when you want a clean reset for that season.
+- Clear volume:
+  - `Clear Volume` in the Admin page deletes all books (and related comments) for the selected volume across all users.
+  - Use this before a new import when you want a clean reset for that volume.
 - Backfill covers:
   - `Backfill Covers` in the Admin page fills missing `thumbnailUrl` values for existing books that have an `isbn`.
   - Uses Open Library covers first, then Google Books as fallback.
 
 - Upload mode:
   - `append`: insert/update matching books for all users
-  - `replace`: replace touched seasons for all users before import
+  - `replace`: replace touched volumes for all users before import
 - Supported columns/fields:
-  - `season` (number)
+  - `volume` (number)
   - `year` or `Year` (number, optional; used for chronological ordering only)
   - `title` (string)
   - `author` (string)
@@ -77,17 +77,17 @@ Admins can open the `Admin` page in the app and upload `.csv` or `.json` reading
   - `resource1Label` + `resource1Url` (optional custom link; supports `resource2*` and `resource3*`)
   - `resources` (optional JSON array of `{ "label": "...", "url": "..." }`)
   - `isFeatured` (optional boolean-like: `true/false`, `1/0`, `yes/no`)
-- Header names are case-insensitive (for example: `Season`, `Year`, `Title`, `Author`, `Month`).
-- `season` is required for each row, either from the CSV/JSON `season` column or from the selected season in the Admin page form.
-- Book lists are shown in reverse chronological order (`year` desc, then `month` desc).
-- To import multiple past seasons in one upload, include a `season` column in the file and choose `Use season column from CSV` in the Admin page.
+- Header names are case-insensitive (for example: `Volume`, `Year`, `Title`, `Author`, `Month`).
+- `volume` is required for each row, either from the CSV/JSON `volume` column or from the selected volume in the Admin page form.
+- Book lists are shown in chronological order (`year` asc, then `month` asc).
+- To import multiple past volumes in one upload, include a `volume` column in the file and choose `Use volume column from CSV` in the Admin page.
 - In the app, book cards are clickable and open a details page at `/books/:bookId` with cover image, comments, and resources links.
 - If `thumbnailUrl` is missing but `isbn` is present, import will auto-populate cover images using Open Library Covers API with Google Books fallback.
 
 CSV example:
 
 ```csv
-season,year,title,author,isbn,month,isFeatured,thumbnailUrl,amazonUrl,bookshopUrl
+volume,year,title,author,isbn,month,isFeatured,thumbnailUrl,amazonUrl,bookshopUrl
 2,2026,The Fifth Season,N. K. Jemisin,9780316229296,August,true,https://example.com/fifth-season.jpg,https://www.amazon.com/dp/0316229296,https://bookshop.org/p/books/the-fifth-season/123
 2,2026,The City We Became,N. K. Jemisin,9780316494199,September,false,,https://www.amazon.com/dp/0316494194,
 1,2025,Anxious People,Fredrik Backman,9781501160833,October,false,,https://www.amazon.com/dp/1501160834,https://bookshop.org/p/books/anxious-people/123
@@ -98,7 +98,7 @@ JSON example:
 ```json
 [
   {
-    "season": 2,
+    "volume": 2,
     "year": 2026,
     "title": "The Fifth Season",
     "author": "N. K. Jemisin",
