@@ -50,6 +50,8 @@ const DB_PATH = path.resolve("server", "data", "bookclub.db");
 mkdirSync(path.dirname(DB_PATH), { recursive: true });
 const PROFILE_IMAGES_DIR = path.resolve("server", "data", "profile-images");
 mkdirSync(PROFILE_IMAGES_DIR, { recursive: true });
+const FEATURED_IMAGES_DIR = path.resolve("server", "data", "featured-images");
+mkdirSync(FEATURED_IMAGES_DIR, { recursive: true });
 const db = new Database(DB_PATH);
 
 db.pragma("journal_mode = WAL");
@@ -79,6 +81,7 @@ CREATE TABLE IF NOT EXISTS books (
   meeting_starts_at TEXT,
   meeting_location TEXT,
   thumbnail_url TEXT,
+  featured_image_url TEXT,
   resources_json TEXT NOT NULL DEFAULT '[]',
   is_featured INTEGER NOT NULL DEFAULT 0,
   is_completed INTEGER NOT NULL DEFAULT 0,
@@ -126,6 +129,7 @@ const addedVolumeColumn = ensureColumnExists(
   "ALTER TABLE books ADD COLUMN volume INTEGER NOT NULL DEFAULT 1"
 );
 ensureColumnExists("books", "thumbnail_url", "ALTER TABLE books ADD COLUMN thumbnail_url TEXT");
+ensureColumnExists("books", "featured_image_url", "ALTER TABLE books ADD COLUMN featured_image_url TEXT");
 ensureColumnExists(
   "books",
   "resources_json",
@@ -201,12 +205,17 @@ app.use(
 app.use(express.json({ limit: "20kb" }));
 app.use(cookieParser());
 app.use("/api/uploads/profile-images", express.static(PROFILE_IMAGES_DIR, { fallthrough: false }));
+app.use("/api/uploads/featured-images", express.static(FEATURED_IMAGES_DIR, { fallthrough: false }));
 
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 1024 * 1024 }
 });
 const profileImageUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 2 * 1024 * 1024 }
+});
+const featuredImageUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 2 * 1024 * 1024 }
 });
@@ -282,6 +291,12 @@ const bookMeetingSchema = z.object({
       message: "A valid meeting date and time is required."
     }),
   location: z.string().trim().min(1).max(160)
+});
+const bookIsbnSchema = z.object({
+  isbn: z.union([z.string(), z.null()]).optional()
+});
+const bookThumbnailSchema = z.object({
+  thumbnailUrl: z.union([z.string().trim().url().max(500), z.null()]).optional()
 });
 const updateProfileSchema = z.object({
   name: z.string().trim().min(2).max(80)
@@ -403,6 +418,14 @@ function getProfileImageExtension(mimeType) {
   return null;
 }
 
+function getFeaturedImageExtension(mimeType) {
+  if (mimeType === "image/jpeg") return "jpg";
+  if (mimeType === "image/png") return "png";
+  if (mimeType === "image/webp") return "webp";
+  if (mimeType === "image/gif") return "gif";
+  return null;
+}
+
 function removeStoredProfileImage(imageUrl) {
   if (!imageUrl || typeof imageUrl !== "string") return;
   const prefix = "/api/uploads/profile-images/";
@@ -416,6 +439,28 @@ function removeStoredProfileImage(imageUrl) {
     }
   } catch {
     // Cleanup failure should not break profile updates.
+  }
+}
+
+function removeStoredFeaturedImageIfUnused(imageUrl) {
+  if (!imageUrl || typeof imageUrl !== "string") return;
+  const prefix = "/api/uploads/featured-images/";
+  if (!imageUrl.startsWith(prefix)) return;
+
+  const inUseCount = Number(
+    db.prepare("SELECT COUNT(*) AS count FROM books WHERE featured_image_url = ?").get(imageUrl)?.count || 0
+  );
+  if (inUseCount > 0) return;
+
+  const fileName = imageUrl.slice(prefix.length);
+  if (!fileName || fileName.includes("/") || fileName.includes("\\")) return;
+  const filePath = path.join(FEATURED_IMAGES_DIR, fileName);
+  try {
+    if (existsSync(filePath)) {
+      unlinkSync(filePath);
+    }
+  } catch {
+    // Cleanup failure should not block updates.
   }
 }
 
@@ -607,6 +652,7 @@ function getBooksPayload(userId) {
         meeting_starts_at AS meetingStartsAt,
         meeting_location AS meetingLocation,
         thumbnail_url AS thumbnailUrl,
+        featured_image_url AS featuredImageUrl,
         resources_json AS resourcesJson,
         is_featured AS isFeatured,
         is_completed AS isCompleted,
@@ -686,6 +732,7 @@ function getBooksPayload(userId) {
     meetingStartsAt: book.meetingStartsAt || null,
     meetingLocation: book.meetingLocation || "",
     thumbnailUrl: book.thumbnailUrl || null,
+    featuredImageUrl: book.featuredImageUrl || null,
     resources: parseResourcesJson(book.resourcesJson),
     isFeatured: Boolean(book.isFeatured),
     isCompleted: Boolean(book.isCompleted),
@@ -1019,6 +1066,12 @@ async function lookupGoogleBooksCover(isbn) {
   } catch {
     return undefined;
   }
+}
+
+async function resolveCoverForIsbn(isbn) {
+  if (!isbn || !COVER_ENRICHMENT_ENABLED) return null;
+  const openLibraryCover = await lookupOpenLibraryCover(isbn);
+  return openLibraryCover || (await lookupGoogleBooksCover(isbn)) || null;
 }
 
 async function enrichRowsWithCovers(rows) {
@@ -1558,6 +1611,168 @@ function clearMeetingForBookForAllUsers(requestUserId, referenceBookId) {
   return applyTransaction();
 }
 
+async function updateIsbnForBookForAllUsers(requestUserId, referenceBookId, isbnInput) {
+  const referenceBook = db
+    .prepare(
+      `
+      SELECT id, title, author, volume
+      FROM books
+      WHERE id = ? AND user_id = ?
+    `
+    )
+    .get(referenceBookId, requestUserId);
+  if (!referenceBook) {
+    return null;
+  }
+
+  const normalizedIsbn = normalizeIsbn(isbnInput);
+  if (isbnInput !== undefined && isbnInput !== null && String(isbnInput).trim() !== "" && !normalizedIsbn) {
+    return { error: "ISBN must be a valid ISBN-10 or ISBN-13." };
+  }
+  const nextIsbn = normalizedIsbn || null;
+  const resolvedCover = nextIsbn ? await resolveCoverForIsbn(nextIsbn) : null;
+
+  const applyTransaction = db.transaction(() => {
+    const usersAffected = db.prepare("SELECT COUNT(*) AS count FROM users").get().count;
+    const booksUpdated = db
+      .prepare(
+        `
+        UPDATE books
+        SET isbn = ?
+        WHERE volume = ? AND lower(title) = lower(?) AND lower(author) = lower(?)
+      `
+      )
+      .run(nextIsbn, referenceBook.volume, referenceBook.title, referenceBook.author).changes;
+    let coversUpdated = 0;
+    if (nextIsbn && COVER_ENRICHMENT_ENABLED) {
+      coversUpdated = db
+        .prepare(
+          `
+          UPDATE books
+          SET thumbnail_url = ?
+          WHERE volume = ? AND lower(title) = lower(?) AND lower(author) = lower(?)
+        `
+        )
+        .run(resolvedCover, referenceBook.volume, referenceBook.title, referenceBook.author).changes;
+    }
+
+    return {
+      usersAffected,
+      booksUpdated,
+      coversUpdated,
+      volume: referenceBook.volume,
+      title: referenceBook.title,
+      author: referenceBook.author,
+      isbn: nextIsbn,
+      coverUrl: resolvedCover,
+      coverResolved: Boolean(resolvedCover),
+      coverSyncAttempted: Boolean(nextIsbn && COVER_ENRICHMENT_ENABLED)
+    };
+  });
+
+  return applyTransaction();
+}
+
+function updateThumbnailForBookForAllUsers(requestUserId, referenceBookId, thumbnailInput) {
+  const referenceBook = db
+    .prepare(
+      `
+      SELECT id, title, author, volume
+      FROM books
+      WHERE id = ? AND user_id = ?
+    `
+    )
+    .get(referenceBookId, requestUserId);
+  if (!referenceBook) {
+    return null;
+  }
+
+  let nextThumbnail = null;
+  if (thumbnailInput !== undefined && thumbnailInput !== null && String(thumbnailInput).trim() !== "") {
+    nextThumbnail = coerceHttpUrl(thumbnailInput);
+    const parsed = bookThumbnailSchema.safeParse({ thumbnailUrl: nextThumbnail });
+    if (!parsed.success) {
+      return { error: "Cover image URL must be a valid URL." };
+    }
+    nextThumbnail = parsed.data.thumbnailUrl;
+  }
+
+  const applyTransaction = db.transaction(() => {
+    const usersAffected = db.prepare("SELECT COUNT(*) AS count FROM users").get().count;
+    const booksUpdated = db
+      .prepare(
+        `
+        UPDATE books
+        SET thumbnail_url = ?
+        WHERE volume = ? AND lower(title) = lower(?) AND lower(author) = lower(?)
+      `
+      )
+      .run(nextThumbnail, referenceBook.volume, referenceBook.title, referenceBook.author).changes;
+
+    return {
+      usersAffected,
+      booksUpdated,
+      volume: referenceBook.volume,
+      title: referenceBook.title,
+      author: referenceBook.author,
+      thumbnailUrl: nextThumbnail
+    };
+  });
+
+  return applyTransaction();
+}
+
+function updateFeaturedImageForBookForAllUsers(requestUserId, referenceBookId, featuredImageUrl) {
+  const referenceBook = db
+    .prepare(
+      `
+      SELECT id, title, author, volume
+      FROM books
+      WHERE id = ? AND user_id = ?
+    `
+    )
+    .get(referenceBookId, requestUserId);
+  if (!referenceBook) {
+    return null;
+  }
+
+  const previous = db
+    .prepare(
+      `
+      SELECT featured_image_url AS featuredImageUrl
+      FROM books
+      WHERE volume = ? AND lower(title) = lower(?) AND lower(author) = lower(?) AND featured_image_url IS NOT NULL
+      LIMIT 1
+    `
+    )
+    .get(referenceBook.volume, referenceBook.title, referenceBook.author);
+
+  const applyTransaction = db.transaction(() => {
+    const usersAffected = db.prepare("SELECT COUNT(*) AS count FROM users").get().count;
+    const booksUpdated = db
+      .prepare(
+        `
+        UPDATE books
+        SET featured_image_url = ?
+        WHERE volume = ? AND lower(title) = lower(?) AND lower(author) = lower(?)
+      `
+      )
+      .run(featuredImageUrl || null, referenceBook.volume, referenceBook.title, referenceBook.author).changes;
+
+    return {
+      usersAffected,
+      booksUpdated,
+      volume: referenceBook.volume,
+      title: referenceBook.title,
+      author: referenceBook.author,
+      featuredImageUrl: featuredImageUrl || null,
+      previousFeaturedImageUrl: previous?.featuredImageUrl || null
+    };
+  });
+
+  return applyTransaction();
+}
+
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true });
 });
@@ -2013,6 +2228,136 @@ app.delete(
       return res.status(404).json({ error: "Book not found." });
     }
 
+    return res.status(204).end();
+  }
+);
+
+app.put(
+  "/api/admin/books/:bookId/isbn",
+  requireAuth,
+  requireRole("admin"),
+  adminLimiter,
+  async (req, res) => {
+    const parsedParams = featureBookParamsSchema.safeParse(req.params);
+    if (!parsedParams.success) {
+      return res.status(400).json({ error: "Invalid book id." });
+    }
+
+    const parsedBody = bookIsbnSchema.safeParse(req.body);
+    if (!parsedBody.success) {
+      return res.status(400).json({ error: "Invalid ISBN data." });
+    }
+
+    const summary = await updateIsbnForBookForAllUsers(
+      req.userId,
+      parsedParams.data.bookId,
+      parsedBody.data.isbn
+    );
+    if (!summary) {
+      return res.status(404).json({ error: "Book not found." });
+    }
+    if (summary.error) {
+      return res.status(400).json({ error: summary.error });
+    }
+
+    return res.json({ summary });
+  }
+);
+
+app.put(
+  "/api/admin/books/:bookId/thumbnail",
+  requireAuth,
+  requireRole("admin"),
+  adminLimiter,
+  (req, res) => {
+    const parsedParams = featureBookParamsSchema.safeParse(req.params);
+    if (!parsedParams.success) {
+      return res.status(400).json({ error: "Invalid book id." });
+    }
+
+    const parsedBody = bookThumbnailSchema.safeParse(req.body);
+    if (!parsedBody.success) {
+      return res.status(400).json({ error: "Invalid cover image data." });
+    }
+
+    const summary = updateThumbnailForBookForAllUsers(
+      req.userId,
+      parsedParams.data.bookId,
+      parsedBody.data.thumbnailUrl
+    );
+    if (!summary) {
+      return res.status(404).json({ error: "Book not found." });
+    }
+    if (summary.error) {
+      return res.status(400).json({ error: summary.error });
+    }
+
+    return res.json({ summary });
+  }
+);
+
+app.post(
+  "/api/admin/books/:bookId/featured-image",
+  requireAuth,
+  requireRole("admin"),
+  adminLimiter,
+  featuredImageUpload.single("file"),
+  (req, res) => {
+    const parsedParams = featureBookParamsSchema.safeParse(req.params);
+    if (!parsedParams.success) {
+      return res.status(400).json({ error: "Invalid book id." });
+    }
+    if (!req.file) {
+      return res.status(400).json({ error: "Select an image file to upload." });
+    }
+
+    const extension = getFeaturedImageExtension(req.file.mimetype);
+    if (!extension) {
+      return res.status(400).json({ error: "Featured image must be JPG, PNG, WEBP, or GIF." });
+    }
+
+    const fileName = `featured-${req.userId}-${randomUUID()}.${extension}`;
+    const filePath = path.join(FEATURED_IMAGES_DIR, fileName);
+    const featuredImageUrl = `/api/uploads/featured-images/${fileName}`;
+    writeFileSync(filePath, req.file.buffer);
+
+    const summary = updateFeaturedImageForBookForAllUsers(
+      req.userId,
+      parsedParams.data.bookId,
+      featuredImageUrl
+    );
+    if (!summary) {
+      removeStoredFeaturedImageIfUnused(featuredImageUrl);
+      return res.status(404).json({ error: "Book not found." });
+    }
+
+    if (summary.previousFeaturedImageUrl && summary.previousFeaturedImageUrl !== featuredImageUrl) {
+      removeStoredFeaturedImageIfUnused(summary.previousFeaturedImageUrl);
+    }
+
+    return res.json({ summary });
+  }
+);
+
+app.delete(
+  "/api/admin/books/:bookId/featured-image",
+  requireAuth,
+  requireRole("admin"),
+  adminLimiter,
+  (req, res) => {
+    const parsedParams = featureBookParamsSchema.safeParse(req.params);
+    if (!parsedParams.success) {
+      return res.status(400).json({ error: "Invalid book id." });
+    }
+
+    const summary = updateFeaturedImageForBookForAllUsers(req.userId, parsedParams.data.bookId, null);
+    if (!summary) {
+      return res.status(404).json({ error: "Book not found." });
+    }
+
+    if (summary.previousFeaturedImageUrl) {
+      removeStoredFeaturedImageIfUnused(summary.previousFeaturedImageUrl);
+    }
     return res.status(204).end();
   }
 );
