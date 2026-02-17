@@ -10,7 +10,7 @@ import helmet from "helmet";
 import jwt from "jsonwebtoken";
 import multer from "multer";
 import { randomUUID } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 
@@ -42,6 +42,8 @@ if (JWT_SECRET === "dev-only-change-me") {
 
 const DB_PATH = path.resolve("server", "data", "bookclub.db");
 mkdirSync(path.dirname(DB_PATH), { recursive: true });
+const PROFILE_IMAGES_DIR = path.resolve("server", "data", "profile-images");
+mkdirSync(PROFILE_IMAGES_DIR, { recursive: true });
 const db = new Database(DB_PATH);
 
 db.pragma("journal_mode = WAL");
@@ -55,6 +57,7 @@ CREATE TABLE IF NOT EXISTS users (
   password_hash TEXT NOT NULL,
   role TEXT NOT NULL DEFAULT 'member',
   is_approved INTEGER NOT NULL DEFAULT 0,
+  profile_image_url TEXT,
   created_at TEXT NOT NULL
 );
 
@@ -72,6 +75,10 @@ CREATE TABLE IF NOT EXISTS books (
   thumbnail_url TEXT,
   resources_json TEXT NOT NULL DEFAULT '[]',
   is_featured INTEGER NOT NULL DEFAULT 0,
+  is_completed INTEGER NOT NULL DEFAULT 0,
+  completed_at TEXT,
+  rating INTEGER,
+  rated_at TEXT,
   created_at TEXT NOT NULL,
   FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
 );
@@ -105,6 +112,7 @@ const addedApprovalColumn = ensureColumnExists(
   "is_approved",
   "ALTER TABLE users ADD COLUMN is_approved INTEGER NOT NULL DEFAULT 0"
 );
+ensureColumnExists("users", "profile_image_url", "ALTER TABLE users ADD COLUMN profile_image_url TEXT");
 const hasLegacySeasonColumn = tableHasColumn("books", "season");
 const addedVolumeColumn = ensureColumnExists(
   "books",
@@ -120,6 +128,14 @@ ensureColumnExists(
 ensureColumnExists("books", "isbn", "ALTER TABLE books ADD COLUMN isbn TEXT");
 ensureColumnExists("books", "meeting_starts_at", "ALTER TABLE books ADD COLUMN meeting_starts_at TEXT");
 ensureColumnExists("books", "meeting_location", "ALTER TABLE books ADD COLUMN meeting_location TEXT");
+ensureColumnExists(
+  "books",
+  "is_completed",
+  "ALTER TABLE books ADD COLUMN is_completed INTEGER NOT NULL DEFAULT 0"
+);
+ensureColumnExists("books", "completed_at", "ALTER TABLE books ADD COLUMN completed_at TEXT");
+ensureColumnExists("books", "rating", "ALTER TABLE books ADD COLUMN rating INTEGER");
+ensureColumnExists("books", "rated_at", "ALTER TABLE books ADD COLUMN rated_at TEXT");
 db.prepare(
   "UPDATE users SET role = 'member' WHERE role NOT IN ('member', 'admin') OR role IS NULL"
 ).run();
@@ -129,6 +145,8 @@ if (addedApprovalColumn) {
 }
 db.prepare("UPDATE users SET is_approved = 1 WHERE role = 'admin'").run();
 db.prepare("UPDATE users SET is_approved = 0 WHERE is_approved IS NULL").run();
+db.prepare("UPDATE books SET is_completed = 0 WHERE is_completed IS NULL").run();
+db.prepare("UPDATE books SET rating = NULL WHERE rating IS NOT NULL AND (rating < 1 OR rating > 5)").run();
 const BASE_LEGACY_YEAR = new Date().getFullYear() - (CURRENT_VOLUME - 1);
 if (addedVolumeColumn) {
   if (hasLegacySeasonColumn) {
@@ -176,10 +194,15 @@ app.use(
 );
 app.use(express.json({ limit: "20kb" }));
 app.use(cookieParser());
+app.use("/api/uploads/profile-images", express.static(PROFILE_IMAGES_DIR, { fallthrough: false }));
 
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 1024 * 1024 }
+});
+const profileImageUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 2 * 1024 * 1024 }
 });
 
 const authLimiter = rateLimit({
@@ -217,6 +240,12 @@ const loginSchema = z.object({
 const commentSchema = z.object({
   text: z.string().trim().min(1).max(400)
 });
+const completionSchema = z.object({
+  completed: z.boolean()
+});
+const ratingSchema = z.object({
+  rating: z.number().int().min(1).max(5)
+});
 
 const readingListModeSchema = z.enum(["append", "replace"]);
 const uploadVolumeSchema = z.preprocess(
@@ -233,6 +262,9 @@ const clearVolumeSchema = z.object({
 const pendingUserIdSchema = z.object({
   userId: z.coerce.number().int().min(1)
 });
+const memberParamsSchema = z.object({
+  memberId: z.coerce.number().int().min(1)
+});
 const featureBookParamsSchema = z.object({
   bookId: z.string().trim().min(1).max(120)
 });
@@ -244,6 +276,9 @@ const bookMeetingSchema = z.object({
       message: "A valid meeting date and time is required."
     }),
   location: z.string().trim().min(1).max(160)
+});
+const updateProfileSchema = z.object({
+  name: z.string().trim().min(2).max(80)
 });
 const resourceLinkSchema = z.object({
   label: z.string().trim().min(1).max(80),
@@ -349,8 +384,33 @@ function formatUser(user) {
     name: user.name,
     email: user.email,
     role: user.role,
-    isApproved: Boolean(user.isApproved ?? user.is_approved)
+    isApproved: Boolean(user.isApproved ?? user.is_approved),
+    profileImageUrl: user.profileImageUrl || user.profile_image_url || null
   };
+}
+
+function getProfileImageExtension(mimeType) {
+  if (mimeType === "image/jpeg") return "jpg";
+  if (mimeType === "image/png") return "png";
+  if (mimeType === "image/webp") return "webp";
+  if (mimeType === "image/gif") return "gif";
+  return null;
+}
+
+function removeStoredProfileImage(imageUrl) {
+  if (!imageUrl || typeof imageUrl !== "string") return;
+  const prefix = "/api/uploads/profile-images/";
+  if (!imageUrl.startsWith(prefix)) return;
+  const fileName = imageUrl.slice(prefix.length);
+  if (!fileName || fileName.includes("/") || fileName.includes("\\")) return;
+  const filePath = path.join(PROFILE_IMAGES_DIR, fileName);
+  try {
+    if (existsSync(filePath)) {
+      unlinkSync(filePath);
+    }
+  } catch {
+    // Cleanup failure should not break profile updates.
+  }
 }
 
 function syncAdminRoleForConfiguredEmail(user) {
@@ -497,6 +557,26 @@ function getBooksPayload(userId) {
         thumbnail_url AS thumbnailUrl,
         resources_json AS resourcesJson,
         is_featured AS isFeatured,
+        is_completed AS isCompleted,
+        completed_at AS completedAt,
+        rating AS userRating,
+        rated_at AS ratedAt,
+        (
+          SELECT ROUND(AVG(b2.rating), 2)
+          FROM books b2
+          WHERE b2.volume = books.volume
+            AND lower(b2.title) = lower(books.title)
+            AND lower(b2.author) = lower(books.author)
+            AND b2.rating IS NOT NULL
+        ) AS averageRating,
+        (
+          SELECT COUNT(*)
+          FROM books b2
+          WHERE b2.volume = books.volume
+            AND lower(b2.title) = lower(books.title)
+            AND lower(b2.author) = lower(books.author)
+            AND b2.rating IS NOT NULL
+        ) AS ratingsCount,
         created_at AS createdAt,
         CASE lower(month)
           WHEN 'january' THEN 1
@@ -556,6 +636,15 @@ function getBooksPayload(userId) {
     thumbnailUrl: book.thumbnailUrl || null,
     resources: parseResourcesJson(book.resourcesJson),
     isFeatured: Boolean(book.isFeatured),
+    isCompleted: Boolean(book.isCompleted),
+    completedAt: book.completedAt || null,
+    userRating: Number.isInteger(book.userRating) ? book.userRating : null,
+    ratedAt: book.ratedAt || null,
+    averageRating:
+      book.averageRating === null || book.averageRating === undefined
+        ? null
+        : Number(book.averageRating),
+    ratingsCount: Number(book.ratingsCount || 0),
     comments: commentsByBookId[book.id] || []
   }));
   const stripVolume = ({ volume, ...book }) => book;
@@ -622,6 +711,7 @@ function getMembersPayload() {
         u.id,
         u.name,
         u.role,
+        u.profile_image_url AS profileImageUrl,
         u.created_at AS createdAt,
         COUNT(c.id) AS commentsCount
       FROM users u
@@ -636,9 +726,86 @@ function getMembersPayload() {
     id: row.id,
     name: row.name,
     role: row.role,
+    profileImageUrl: row.profileImageUrl || null,
     createdAt: row.createdAt,
     commentsCount: Number(row.commentsCount || 0)
   }));
+}
+
+function getMemberProfilePayload(memberId, viewerUserId) {
+  const member = db
+    .prepare(
+      `
+      SELECT
+        u.id,
+        u.name,
+        u.role,
+        u.profile_image_url AS profileImageUrl,
+        u.created_at AS createdAt,
+        (
+          SELECT COUNT(*)
+          FROM comments c
+          WHERE c.user_id = u.id
+        ) AS commentsCount,
+        (
+          SELECT COUNT(*)
+          FROM (
+            SELECT volume, lower(title), lower(author)
+            FROM books b
+            WHERE b.user_id = u.id
+              AND b.is_completed = 1
+            GROUP BY volume, lower(title), lower(author)
+          )
+        ) AS booksRead
+      FROM users u
+      WHERE u.id = ? AND u.is_approved = 1
+    `
+    )
+    .get(memberId);
+
+  if (!member) return null;
+
+  const recentComments = db
+    .prepare(
+      `
+      SELECT
+        c.id,
+        c.text,
+        c.created_at AS createdAt,
+        b.id AS bookId,
+        b.title AS bookTitle,
+        b.author AS bookAuthor,
+        b.volume,
+        (
+          SELECT b2.id
+          FROM books b2
+          WHERE b2.user_id = ?
+            AND b2.volume = b.volume
+            AND lower(b2.title) = lower(b.title)
+            AND lower(b2.author) = lower(b.author)
+          LIMIT 1
+        ) AS viewerBookId
+      FROM comments c
+      INNER JOIN books b ON b.id = c.book_id
+      WHERE c.user_id = ?
+      ORDER BY c.created_at DESC
+      LIMIT 12
+    `
+    )
+    .all(viewerUserId, memberId);
+
+  return {
+    member: {
+      id: member.id,
+      name: member.name,
+      role: member.role,
+      profileImageUrl: member.profileImageUrl || null,
+      createdAt: member.createdAt,
+      commentsCount: Number(member.commentsCount || 0),
+      booksRead: Number(member.booksRead || 0)
+    },
+    recentComments
+  };
 }
 
 function getDashboardPayload() {
@@ -1371,7 +1538,9 @@ app.post("/api/auth/register", authLimiter, async (req, res) => {
     const userId = Number(result.lastInsertRowid);
     seedBooksForUser(userId);
     const user = db
-      .prepare("SELECT id, name, email, role, is_approved AS isApproved FROM users WHERE id = ?")
+      .prepare(
+        "SELECT id, name, email, role, is_approved AS isApproved, profile_image_url AS profileImageUrl FROM users WHERE id = ?"
+      )
       .get(userId);
     if (!isApproved) {
       return res.status(201).json({
@@ -1399,7 +1568,7 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
   const { email, password } = parsed.data;
   let user = db
     .prepare(
-      "SELECT id, name, email, role, is_approved AS isApproved, password_hash AS passwordHash FROM users WHERE email = ?"
+      "SELECT id, name, email, role, is_approved AS isApproved, profile_image_url AS profileImageUrl, password_hash AS passwordHash FROM users WHERE email = ?"
     )
     .get(email);
 
@@ -1429,7 +1598,9 @@ app.post("/api/auth/logout", requireAuth, (req, res) => {
 
 app.get("/api/auth/me", requireAuth, (req, res) => {
   let user = db
-    .prepare("SELECT id, name, email, role, is_approved AS isApproved FROM users WHERE id = ?")
+    .prepare(
+      "SELECT id, name, email, role, is_approved AS isApproved, profile_image_url AS profileImageUrl FROM users WHERE id = ?"
+    )
     .get(req.userId);
   if (!user) {
     clearSessionCookie(res);
@@ -1495,9 +1666,195 @@ app.get("/api/books", requireAuth, (req, res) => {
   res.json(payload);
 });
 
+app.put("/api/books/:bookId/completion", requireAuth, (req, res) => {
+  const parsedParams = featureBookParamsSchema.safeParse(req.params);
+  if (!parsedParams.success) {
+    return res.status(400).json({ error: "Invalid book id." });
+  }
+  const parsedBody = completionSchema.safeParse(req.body);
+  if (!parsedBody.success) {
+    return res.status(400).json({ error: "Completion state must be true or false." });
+  }
+
+  const exists = db
+    .prepare("SELECT id FROM books WHERE id = ? AND user_id = ?")
+    .get(parsedParams.data.bookId, req.userId);
+  if (!exists) {
+    return res.status(404).json({ error: "Book not found." });
+  }
+
+  const completedAt = parsedBody.data.completed ? new Date().toISOString() : null;
+  if (parsedBody.data.completed) {
+    db.prepare("UPDATE books SET is_completed = 1, completed_at = ? WHERE id = ? AND user_id = ?").run(
+      completedAt,
+      parsedParams.data.bookId,
+      req.userId
+    );
+  } else {
+    db.prepare(
+      "UPDATE books SET is_completed = 0, completed_at = NULL, rating = NULL, rated_at = NULL WHERE id = ? AND user_id = ?"
+    ).run(parsedParams.data.bookId, req.userId);
+  }
+
+  return res.json({
+    completion: {
+      bookId: parsedParams.data.bookId,
+      isCompleted: parsedBody.data.completed,
+      completedAt
+    }
+  });
+});
+
+app.put("/api/books/:bookId/rating", requireAuth, (req, res) => {
+  const parsedParams = featureBookParamsSchema.safeParse(req.params);
+  if (!parsedParams.success) {
+    return res.status(400).json({ error: "Invalid book id." });
+  }
+  const parsedBody = ratingSchema.safeParse(req.body);
+  if (!parsedBody.success) {
+    return res.status(400).json({ error: "Rating must be an integer from 1 to 5." });
+  }
+
+  const book = db
+    .prepare("SELECT id, is_completed AS isCompleted FROM books WHERE id = ? AND user_id = ?")
+    .get(parsedParams.data.bookId, req.userId);
+  if (!book) {
+    return res.status(404).json({ error: "Book not found." });
+  }
+  if (!Boolean(book.isCompleted)) {
+    return res.status(400).json({ error: "Complete the book before leaving a rating." });
+  }
+
+  const ratedAt = new Date().toISOString();
+  db.prepare("UPDATE books SET rating = ?, rated_at = ? WHERE id = ? AND user_id = ?").run(
+    parsedBody.data.rating,
+    ratedAt,
+    parsedParams.data.bookId,
+    req.userId
+  );
+
+  return res.json({
+    rating: {
+      bookId: parsedParams.data.bookId,
+      value: parsedBody.data.rating,
+      ratedAt
+    }
+  });
+});
+
+app.delete("/api/books/:bookId/rating", requireAuth, (req, res) => {
+  const parsedParams = featureBookParamsSchema.safeParse(req.params);
+  if (!parsedParams.success) {
+    return res.status(400).json({ error: "Invalid book id." });
+  }
+
+  const exists = db
+    .prepare("SELECT id FROM books WHERE id = ? AND user_id = ?")
+    .get(parsedParams.data.bookId, req.userId);
+  if (!exists) {
+    return res.status(404).json({ error: "Book not found." });
+  }
+
+  db.prepare("UPDATE books SET rating = NULL, rated_at = NULL WHERE id = ? AND user_id = ?").run(
+    parsedParams.data.bookId,
+    req.userId
+  );
+  return res.status(204).end();
+});
+
 app.get("/api/dashboard", requireAuth, (_req, res) => {
   const payload = getDashboardPayload();
   return res.json(payload);
+});
+
+app.get("/api/members/:memberId", requireAuth, (req, res) => {
+  const parsed = memberParamsSchema.safeParse(req.params);
+  if (!parsed.success) {
+    return res.status(400).json({ error: "Invalid member id." });
+  }
+
+  const payload = getMemberProfilePayload(parsed.data.memberId, req.userId);
+  if (!payload) {
+    return res.status(404).json({ error: "Member not found." });
+  }
+  return res.json(payload);
+});
+
+app.put("/api/users/me/profile", requireAuth, authLimiter, (req, res) => {
+  const parsed = updateProfileSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.issues[0]?.message || "Invalid profile data." });
+  }
+
+  db.prepare("UPDATE users SET name = ? WHERE id = ?").run(parsed.data.name, req.userId);
+
+  const user = db
+    .prepare(
+      "SELECT id, name, email, role, is_approved AS isApproved, profile_image_url AS profileImageUrl FROM users WHERE id = ?"
+    )
+    .get(req.userId);
+  if (!user) {
+    clearSessionCookie(res);
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  return res.json({ user: formatUser(user) });
+});
+
+app.post(
+  "/api/users/me/profile-image",
+  requireAuth,
+  authLimiter,
+  profileImageUpload.single("file"),
+  (req, res) => {
+    if (!req.file) {
+      return res.status(400).json({ error: "Select an image file to upload." });
+    }
+
+    const extension = getProfileImageExtension(req.file.mimetype);
+    if (!extension) {
+      return res.status(400).json({ error: "Profile image must be JPG, PNG, WEBP, or GIF." });
+    }
+
+    const previous = db
+      .prepare("SELECT profile_image_url AS profileImageUrl FROM users WHERE id = ?")
+      .get(req.userId);
+    if (!previous) {
+      clearSessionCookie(res);
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const fileName = `${req.userId}-${randomUUID()}.${extension}`;
+    const filePath = path.join(PROFILE_IMAGES_DIR, fileName);
+    writeFileSync(filePath, req.file.buffer);
+    const profileImageUrl = `/api/uploads/profile-images/${fileName}`;
+
+    db.prepare("UPDATE users SET profile_image_url = ? WHERE id = ?").run(profileImageUrl, req.userId);
+    removeStoredProfileImage(previous.profileImageUrl);
+
+    const user = db
+      .prepare(
+        "SELECT id, name, email, role, is_approved AS isApproved, profile_image_url AS profileImageUrl FROM users WHERE id = ?"
+      )
+      .get(req.userId);
+    return res.json({ user: formatUser(user) });
+  }
+);
+
+app.delete("/api/users/me/profile-image", requireAuth, authLimiter, (req, res) => {
+  const user = db
+    .prepare(
+      "SELECT id, name, email, role, is_approved AS isApproved, profile_image_url AS profileImageUrl FROM users WHERE id = ?"
+    )
+    .get(req.userId);
+  if (!user) {
+    clearSessionCookie(res);
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  db.prepare("UPDATE users SET profile_image_url = NULL WHERE id = ?").run(req.userId);
+  removeStoredProfileImage(user.profileImageUrl);
+  return res.json({ user: formatUser({ ...user, profileImageUrl: null }) });
 });
 
 app.post("/api/books/:bookId/comments", requireAuth, (req, res) => {
@@ -1755,6 +2112,9 @@ app.post(
 );
 
 app.use((error, _req, res, _next) => {
+  if (error?.name === "MulterError" && error?.code === "LIMIT_FILE_SIZE") {
+    return res.status(400).json({ error: "Uploaded file is too large. Maximum size is 2MB." });
+  }
   if (String(error.message).includes("CORS")) {
     return res.status(403).json({ error: "CORS blocked for this origin." });
   }

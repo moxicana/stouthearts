@@ -12,6 +12,8 @@ const router = useRouter();
 const loading = ref(true);
 const submittingAuth = ref(false);
 const busyBookId = ref("");
+const completingBookId = ref("");
+const ratingBookId = ref("");
 const featuringBookId = ref("");
 const uploadingReadingList = ref(false);
 const clearingVolume = ref(false);
@@ -54,6 +56,17 @@ const dashboardStats = ref({
   currentVolumeBooks: 0
 });
 const members = ref([]);
+const memberProfile = ref(null);
+const memberRecentComments = ref([]);
+const loadingMemberProfile = ref(false);
+const savingProfile = ref(false);
+const uploadingProfileImage = ref(false);
+const profileImageFile = ref(null);
+const profileMessage = ref("");
+const profileMessageTone = ref("success");
+const profileForm = ref({
+  name: ""
+});
 const savingBookMeeting = ref(false);
 const clearingBookMeeting = ref(false);
 const meetingMessage = ref("");
@@ -84,6 +97,10 @@ const routeBookId = computed(() => {
   const match = route.path.match(/^\/books\/([^/]+)$/);
   return match ? decodeURIComponent(match[1]) : null;
 });
+const routeMemberId = computed(() => {
+  const match = route.path.match(/^\/members\/(\d+)$/);
+  return match ? Number(match[1]) : null;
+});
 const selectedBook = computed(() => {
   if (!routeBookId.value) return null;
   for (const volumeGroup of volumes.value) {
@@ -93,6 +110,10 @@ const selectedBook = computed(() => {
   return null;
 });
 const viewingBookDetails = computed(() => Boolean(routeBookId.value));
+const viewingMemberProfile = computed(() => routeMemberId.value !== null);
+const isOwnProfile = computed(
+  () => Boolean(memberProfile.value && user.value && memberProfile.value.id === user.value.id)
+);
 const featuredBook = computed(
   () => selectedVolumeBooks.value.find((book) => book.isFeatured) || selectedVolumeBooks.value[0]
 );
@@ -146,6 +167,21 @@ watch(selectedBook, (value) => {
     meetingMessage.value = "";
   }
 });
+
+watch(
+  [routeMemberId, () => user.value?.id],
+  async ([memberId, userId]) => {
+    if (!memberId) {
+      memberProfile.value = null;
+      memberRecentComments.value = [];
+      profileMessage.value = "";
+      return;
+    }
+    if (!userId) return;
+    await loadMemberProfile(memberId);
+  },
+  { immediate: true }
+);
 
 onMounted(async () => {
   await bootstrap();
@@ -209,6 +245,18 @@ function getHostname(value) {
   } catch {
     return "";
   }
+}
+
+function getInitials(name) {
+  const parts = String(name || "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (parts.length === 0) return "U";
+  return parts
+    .slice(0, 2)
+    .map((part) => part[0].toUpperCase())
+    .join("");
 }
 
 function toDateTimeLocal(value) {
@@ -282,6 +330,8 @@ async function bootstrap() {
       currentVolumeBooks: 0
     };
     members.value = [];
+    memberProfile.value = null;
+    memberRecentComments.value = [];
   } finally {
     loading.value = false;
   }
@@ -319,6 +369,26 @@ async function loadDashboard() {
     currentVolumeBooks: payload.stats?.currentVolumeBooks ?? 0
   };
   members.value = payload.members || [];
+}
+
+async function loadMemberProfile(memberId) {
+  loadingMemberProfile.value = true;
+  profileMessage.value = "";
+  try {
+    const payload = await api(`/members/${encodeURIComponent(String(memberId))}`);
+    memberProfile.value = payload.member || null;
+    memberRecentComments.value = payload.recentComments || [];
+    profileForm.value = {
+      name: payload.member?.name || ""
+    };
+    profileImageFile.value = null;
+  } catch (error) {
+    memberProfile.value = null;
+    memberRecentComments.value = [];
+    errorMessage.value = error.message;
+  } finally {
+    loadingMemberProfile.value = false;
+  }
 }
 
 async function loadUploadHistory() {
@@ -416,6 +486,102 @@ async function clearBookMeeting() {
   }
 }
 
+async function saveProfile() {
+  if (!isOwnProfile.value) return;
+  profileMessage.value = "";
+  const name = (profileForm.value.name || "").trim();
+  if (name.length < 2) {
+    profileMessageTone.value = "error";
+    profileMessage.value = "Name must be at least 2 characters.";
+    return;
+  }
+
+  savingProfile.value = true;
+  try {
+    const payload = await api("/users/me/profile", {
+      method: "PUT",
+      body: JSON.stringify({
+        name
+      })
+    });
+    user.value = payload.user;
+    await loadBooks();
+    await loadDashboard();
+    if (memberProfile.value?.id) {
+      await loadMemberProfile(memberProfile.value.id);
+    }
+    profileMessageTone.value = "success";
+    profileMessage.value = "Profile updated.";
+  } catch (error) {
+    profileMessageTone.value = "error";
+    profileMessage.value = error.message;
+  } finally {
+    savingProfile.value = false;
+  }
+}
+
+function setProfileImageFile(event) {
+  profileImageFile.value = event.target.files?.[0] || null;
+}
+
+async function uploadProfileImage() {
+  if (!isOwnProfile.value) return;
+  if (!profileImageFile.value) {
+    profileMessageTone.value = "error";
+    profileMessage.value = "Choose an image file first.";
+    return;
+  }
+
+  profileMessage.value = "";
+  uploadingProfileImage.value = true;
+  try {
+    const formData = new FormData();
+    formData.append("file", profileImageFile.value);
+    const payload = await api("/users/me/profile-image", {
+      method: "POST",
+      body: formData
+    });
+    user.value = payload.user;
+    profileImageFile.value = null;
+    await loadBooks();
+    await loadDashboard();
+    if (memberProfile.value?.id) {
+      await loadMemberProfile(memberProfile.value.id);
+    }
+    profileMessageTone.value = "success";
+    profileMessage.value = "Profile image updated.";
+  } catch (error) {
+    profileMessageTone.value = "error";
+    profileMessage.value = error.message;
+  } finally {
+    uploadingProfileImage.value = false;
+  }
+}
+
+async function clearProfileImage() {
+  if (!isOwnProfile.value) return;
+  profileMessage.value = "";
+  uploadingProfileImage.value = true;
+  try {
+    const payload = await api("/users/me/profile-image", {
+      method: "DELETE"
+    });
+    user.value = payload.user;
+    profileImageFile.value = null;
+    await loadDashboard();
+    if (memberProfile.value?.id) {
+      await loadMemberProfile(memberProfile.value.id);
+    }
+    profileMessageTone.value = "success";
+    profileMessage.value = "Profile image removed.";
+  } catch (error) {
+    profileMessageTone.value = "error";
+    profileMessage.value = error.message;
+  } finally {
+    uploadingProfileImage.value = false;
+  }
+}
+
 async function submitAuth() {
   resetAuthError();
   submittingAuth.value = true;
@@ -464,6 +630,8 @@ async function logout() {
     // Client-side cleanup still runs even if API logout fails.
   } finally {
     user.value = null;
+    completingBookId.value = "";
+    ratingBookId.value = "";
     volumes.value = [];
     selectedVolume.value = null;
     showVolumeMenu.value = false;
@@ -479,6 +647,11 @@ async function logout() {
       currentVolumeBooks: 0
     };
     members.value = [];
+    memberProfile.value = null;
+    memberRecentComments.value = [];
+    profileForm.value = { name: "" };
+    profileImageFile.value = null;
+    profileMessage.value = "";
     meetingForm.value = { date: "", time: "", location: "" };
     meetingMessage.value = "";
     activeView.value = "volume";
@@ -504,6 +677,68 @@ async function addComment(bookId) {
     errorMessage.value = error.message;
   } finally {
     busyBookId.value = "";
+  }
+}
+
+async function setBookCompletion(bookId, completed) {
+  if (!bookId) return;
+  completingBookId.value = bookId;
+  resetAuthError();
+  try {
+    await api(`/books/${encodeURIComponent(bookId)}/completion`, {
+      method: "PUT",
+      body: JSON.stringify({ completed })
+    });
+    await loadBooks();
+    await loadDashboard();
+    if (routeMemberId.value) {
+      await loadMemberProfile(routeMemberId.value);
+    }
+  } catch (error) {
+    errorMessage.value = error.message;
+  } finally {
+    completingBookId.value = "";
+  }
+}
+
+async function setBookRating(bookId, rating) {
+  if (!bookId) return;
+  ratingBookId.value = bookId;
+  resetAuthError();
+  try {
+    await api(`/books/${encodeURIComponent(bookId)}/rating`, {
+      method: "PUT",
+      body: JSON.stringify({ rating })
+    });
+    await loadBooks();
+    await loadDashboard();
+    if (routeMemberId.value) {
+      await loadMemberProfile(routeMemberId.value);
+    }
+  } catch (error) {
+    errorMessage.value = error.message;
+  } finally {
+    ratingBookId.value = "";
+  }
+}
+
+async function clearBookRating(bookId) {
+  if (!bookId) return;
+  ratingBookId.value = bookId;
+  resetAuthError();
+  try {
+    await api(`/books/${encodeURIComponent(bookId)}/rating`, {
+      method: "DELETE"
+    });
+    await loadBooks();
+    await loadDashboard();
+    if (routeMemberId.value) {
+      await loadMemberProfile(routeMemberId.value);
+    }
+  } catch (error) {
+    errorMessage.value = error.message;
+  } finally {
+    ratingBookId.value = "";
   }
 }
 
@@ -718,6 +953,17 @@ function openBookDetails(bookId) {
 function closeBookDetails() {
   router.push("/");
 }
+
+function openMemberProfile(memberId) {
+  if (!memberId) return;
+  activeView.value = "volume";
+  showVolumeMenu.value = false;
+  router.push(`/members/${encodeURIComponent(String(memberId))}`);
+}
+
+function closeMemberProfile() {
+  router.push("/");
+}
 </script>
 
 <template>
@@ -784,9 +1030,24 @@ function closeBookDetails() {
             </nav>
           </div>
           <div class="flex items-center gap-2 sm:gap-3">
-            <span v-if="user" class="text-sm text-zinc-600 dark:text-zinc-400">
-              {{ user.name }} ({{ user.role }})
-            </span>
+            <button
+              v-if="user"
+              class="btn-secondary inline-flex items-center gap-2 px-2 py-1.5"
+              @click="openMemberProfile(user.id)"
+            >
+              <span class="flex h-7 w-7 items-center justify-center overflow-hidden rounded-full border border-zinc-200 bg-zinc-100 text-xs font-semibold text-zinc-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200">
+                <img
+                  v-if="user.profileImageUrl"
+                  :src="user.profileImageUrl"
+                  :alt="`${user.name} profile image`"
+                  class="h-full w-full object-cover"
+                />
+                <span v-else>{{ getInitials(user.name) }}</span>
+              </span>
+              <span class="text-sm text-zinc-600 dark:text-zinc-400">
+                {{ user.name }} ({{ user.role }})
+              </span>
+            </button>
             <button v-if="user" class="btn-secondary" @click="logout">Sign out</button>
             <button
               class="btn-secondary inline-flex h-10 w-10 items-center justify-center p-0"
@@ -939,6 +1200,74 @@ function closeBookDetails() {
             </div>
 
             <div class="space-y-2">
+              <h3 class="text-lg font-semibold">Reading Status</h3>
+              <p v-if="selectedBook.isCompleted" class="text-sm text-emerald-700 dark:text-emerald-300">
+                Completed
+                <span v-if="selectedBook.completedAt">
+                  on {{ formatDate(selectedBook.completedAt) }} at {{ formatCommentTime(selectedBook.completedAt) }}
+                </span>
+              </p>
+              <p v-else class="text-sm text-zinc-600 dark:text-zinc-400">Not completed yet.</p>
+              <button
+                class="btn-secondary"
+                :disabled="completingBookId === selectedBook.id"
+                @click="setBookCompletion(selectedBook.id, !selectedBook.isCompleted)"
+              >
+                {{
+                  completingBookId === selectedBook.id
+                    ? "Saving..."
+                    : selectedBook.isCompleted
+                      ? "Mark as Not Completed"
+                      : "Mark as Completed"
+                }}
+              </button>
+
+              <div class="pt-2">
+                <p class="text-sm text-zinc-700 dark:text-zinc-300">
+                  Average rating:
+                  <span v-if="selectedBook.ratingsCount > 0" class="font-semibold">
+                    {{ selectedBook.averageRating.toFixed(1) }}/5
+                    ({{ selectedBook.ratingsCount }} rating{{ selectedBook.ratingsCount === 1 ? "" : "s" }})
+                  </span>
+                  <span v-else class="text-zinc-600 dark:text-zinc-400">No ratings yet</span>
+                </p>
+
+                <div v-if="selectedBook.isCompleted" class="mt-2 flex flex-wrap items-center gap-2">
+                  <p class="text-sm text-zinc-700 dark:text-zinc-300">Your rating:</p>
+                  <div class="flex items-center gap-1">
+                    <button
+                      v-for="star in 5"
+                      :key="`rate-${selectedBook.id}-${star}`"
+                      type="button"
+                      class="rounded px-1 text-xl leading-none transition"
+                      :class="
+                        (selectedBook.userRating || 0) >= star
+                          ? 'text-amber-500 hover:text-amber-400'
+                          : 'text-zinc-400 hover:text-zinc-500 dark:text-zinc-500 dark:hover:text-zinc-300'
+                      "
+                      :disabled="ratingBookId === selectedBook.id"
+                      @click="setBookRating(selectedBook.id, star)"
+                    >
+                      ★
+                    </button>
+                  </div>
+                  <button
+                    v-if="selectedBook.userRating"
+                    type="button"
+                    class="btn-secondary px-2 py-1 text-xs"
+                    :disabled="ratingBookId === selectedBook.id"
+                    @click="clearBookRating(selectedBook.id)"
+                  >
+                    {{ ratingBookId === selectedBook.id ? "Saving..." : "Clear Rating" }}
+                  </button>
+                </div>
+                <p v-else class="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
+                  Mark this book completed to leave a rating.
+                </p>
+              </div>
+            </div>
+
+            <div class="space-y-2">
               <h3 class="text-lg font-semibold">Meeting</h3>
               <p
                 v-if="selectedBook.meetingStartsAt"
@@ -1082,6 +1411,151 @@ function closeBookDetails() {
           </section>
         </section>
 
+        <section v-else-if="activeView === 'volume' && viewingMemberProfile" class="space-y-4">
+          <section v-if="loadingMemberProfile" class="panel">
+            <p>Loading profile...</p>
+          </section>
+
+          <section v-else-if="memberProfile" class="panel space-y-4">
+            <div class="flex items-center justify-between gap-3">
+              <button class="btn-secondary" @click="closeMemberProfile">Back to Volume</button>
+              <p class="text-sm text-zinc-600 dark:text-zinc-400">{{ memberProfile.role }}</p>
+            </div>
+
+            <div class="flex flex-wrap items-center gap-4">
+              <div class="flex h-20 w-20 shrink-0 items-center justify-center overflow-hidden rounded-full border border-zinc-200 bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800">
+                <img
+                  v-if="memberProfile.profileImageUrl"
+                  :src="memberProfile.profileImageUrl"
+                  :alt="`${memberProfile.name} profile image`"
+                  class="h-full w-full object-cover"
+                />
+                <span v-else class="text-xl font-semibold text-zinc-600 dark:text-zinc-300">
+                  {{ getInitials(memberProfile.name) }}
+                </span>
+              </div>
+              <div>
+                <h2 class="text-3xl font-semibold">{{ memberProfile.name }}</h2>
+                <p class="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
+                  Joined {{ formatDate(memberProfile.createdAt) }}
+                </p>
+              </div>
+            </div>
+
+            <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              <article class="card">
+                <p class="text-2xl font-semibold">{{ memberProfile.booksRead }}</p>
+                <p class="text-sm text-zinc-600 dark:text-zinc-400">Books Completed</p>
+              </article>
+              <article class="card">
+                <p class="text-2xl font-semibold">{{ memberProfile.commentsCount }}</p>
+                <p class="text-sm text-zinc-600 dark:text-zinc-400">Comments Posted</p>
+              </article>
+              <article class="card">
+                <p class="text-2xl font-semibold">{{ memberProfile.role }}</p>
+                <p class="text-sm text-zinc-600 dark:text-zinc-400">Role</p>
+              </article>
+            </div>
+
+            <form v-if="isOwnProfile" class="card space-y-2" @submit.prevent="saveProfile">
+              <h3 class="text-lg font-semibold">Edit Profile</h3>
+              <label class="field-label">
+                Name
+                <input v-model="profileForm.name" class="input" type="text" required maxlength="80" />
+              </label>
+              <label class="field-label">
+                Profile Image
+                <input
+                  class="input"
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp,image/gif"
+                  @change="setProfileImageFile"
+                />
+              </label>
+              <p class="text-xs text-zinc-500 dark:text-zinc-400">
+                Upload JPG, PNG, WEBP, or GIF up to 2MB.
+              </p>
+              <p
+                v-if="profileMessage"
+                class="text-sm"
+                :class="
+                  profileMessageTone === 'error'
+                    ? 'text-rose-600 dark:text-rose-300'
+                    : 'text-emerald-700 dark:text-emerald-300'
+                "
+              >
+                {{ profileMessage }}
+              </p>
+              <div class="flex flex-wrap gap-2">
+                <button class="btn-primary" :disabled="savingProfile || uploadingProfileImage">
+                  {{ savingProfile ? "Saving..." : "Save Profile" }}
+                </button>
+                <button
+                  type="button"
+                  class="btn-secondary"
+                  :disabled="uploadingProfileImage || !profileImageFile"
+                  @click="uploadProfileImage"
+                >
+                  {{ uploadingProfileImage ? "Uploading..." : "Upload Image" }}
+                </button>
+                <button
+                  type="button"
+                  class="btn-danger"
+                  :disabled="uploadingProfileImage || !memberProfile.profileImageUrl"
+                  @click="clearProfileImage"
+                >
+                  {{ uploadingProfileImage ? "Working..." : "Remove Image" }}
+                </button>
+              </div>
+            </form>
+
+            <section v-else class="card">
+              <p class="text-sm text-zinc-600 dark:text-zinc-400">
+                Only this member can edit their profile image.
+              </p>
+            </section>
+
+            <section class="space-y-2">
+              <h3 class="text-lg font-semibold">Recent Comments</h3>
+              <p
+                v-if="memberRecentComments.length === 0"
+                class="text-sm text-zinc-600 dark:text-zinc-400"
+              >
+                No comments yet.
+              </p>
+              <ul v-else class="space-y-2">
+                <li
+                  v-for="comment in memberRecentComments"
+                  :key="comment.id"
+                  class="comment-row"
+                >
+                  <div class="min-w-0">
+                    <p>{{ comment.text }}</p>
+                    <p class="text-xs text-zinc-500 dark:text-zinc-400">
+                      {{ formatDate(comment.createdAt) }} at {{ formatCommentTime(comment.createdAt) }}
+                    </p>
+                  </div>
+                  <button
+                    class="btn-secondary shrink-0 px-2 py-1 text-xs"
+                    :disabled="!comment.viewerBookId"
+                    @click="openBookDetails(comment.viewerBookId)"
+                  >
+                    {{ comment.viewerBookId ? comment.bookTitle : "Book unavailable" }}
+                  </button>
+                </li>
+              </ul>
+            </section>
+          </section>
+
+          <section v-else class="panel space-y-3">
+            <h2 class="text-2xl font-semibold">Member not found</h2>
+            <p class="text-sm text-zinc-600 dark:text-zinc-400">
+              This profile may not exist or may be unavailable.
+            </p>
+            <button class="btn-secondary" @click="closeMemberProfile">Back to Volume</button>
+          </section>
+        </section>
+
         <section v-else-if="activeView === 'volume'" class="space-y-4">
           <section class="panel">
             <h2 class="text-3xl font-semibold tracking-tight">{{ greetingMessage }}, {{ firstName }}</h2>
@@ -1143,6 +1617,15 @@ function closeBookDetails() {
                 <div>
                   <h3 class="text-2xl font-semibold">{{ featuredBook.title }}</h3>
                   <p class="text-zinc-700 dark:text-zinc-300">by {{ featuredBook.author }}</p>
+                  <p
+                    v-if="featuredBook.isCompleted"
+                    class="mt-1 text-xs font-semibold uppercase tracking-wide text-emerald-700 dark:text-emerald-300"
+                  >
+                    Completed
+                  </p>
+                  <p v-if="featuredBook.ratingsCount > 0" class="mt-1 text-xs text-amber-700 dark:text-amber-300">
+                    ★ {{ featuredBook.averageRating.toFixed(1) }} ({{ featuredBook.ratingsCount }})
+                  </p>
                   <p class="mt-2 text-sm text-zinc-600 dark:text-zinc-400">
                     {{ featuredBook.month }} {{ featuredBook.year }} in Volume {{ selectedVolumeLabel ?? currentVolume }}
                   </p>
@@ -1219,6 +1702,15 @@ function closeBookDetails() {
                       <p class="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
                         {{ book.author }} | {{ book.month }} {{ book.year }}
                       </p>
+                      <p
+                        v-if="book.isCompleted"
+                        class="mt-1 text-xs font-semibold uppercase tracking-wide text-emerald-700 dark:text-emerald-300"
+                      >
+                        Completed
+                      </p>
+                      <p v-if="book.ratingsCount > 0" class="mt-1 text-xs text-amber-700 dark:text-amber-300">
+                        ★ {{ book.averageRating.toFixed(1) }} ({{ book.ratingsCount }})
+                      </p>
                       <p class="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
                         {{ book.comments.length }} comment{{ book.comments.length === 1 ? "" : "s" }}
                       </p>
@@ -1238,24 +1730,42 @@ function closeBookDetails() {
                 No active members yet.
               </p>
               <ul v-else class="mt-3 space-y-2">
-                <li v-for="member in members" :key="member.id" class="comment-row">
-                  <div class="min-w-0">
-                    <p class="font-medium text-zinc-900 dark:text-zinc-100">{{ member.name }}</p>
-                    <p class="text-xs text-zinc-500 dark:text-zinc-400">
-                      Joined {{ formatDate(member.createdAt) }}
-                    </p>
-                  </div>
-                  <div class="shrink-0 text-right">
-                    <p
-                      class="text-xs font-semibold uppercase tracking-wide"
-                      :class="member.role === 'admin' ? 'text-amber-700 dark:text-amber-300' : 'text-zinc-500 dark:text-zinc-400'"
-                    >
-                      {{ member.role }}
-                    </p>
-                    <p class="text-xs text-zinc-500 dark:text-zinc-400">
-                      {{ member.commentsCount }} comment{{ member.commentsCount === 1 ? "" : "s" }}
-                    </p>
-                  </div>
+                <li v-for="member in members" :key="member.id">
+                  <button
+                    class="comment-row w-full text-left transition hover:-translate-y-0.5 hover:border-emerald-300 dark:hover:border-emerald-600"
+                    @click="openMemberProfile(member.id)"
+                  >
+                    <div class="flex min-w-0 items-center gap-3">
+                      <div class="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-full border border-zinc-200 bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800">
+                        <img
+                          v-if="member.profileImageUrl"
+                          :src="member.profileImageUrl"
+                          :alt="`${member.name} profile image`"
+                          class="h-full w-full object-cover"
+                        />
+                        <span v-else class="text-sm font-semibold text-zinc-600 dark:text-zinc-300">
+                          {{ getInitials(member.name) }}
+                        </span>
+                      </div>
+                      <div class="min-w-0">
+                        <p class="font-medium text-zinc-900 dark:text-zinc-100">{{ member.name }}</p>
+                        <p class="text-xs text-zinc-500 dark:text-zinc-400">
+                          Joined {{ formatDate(member.createdAt) }}
+                        </p>
+                      </div>
+                    </div>
+                    <div class="shrink-0 text-right">
+                      <p
+                        class="text-xs font-semibold uppercase tracking-wide"
+                        :class="member.role === 'admin' ? 'text-amber-700 dark:text-amber-300' : 'text-zinc-500 dark:text-zinc-400'"
+                      >
+                        {{ member.role }}
+                      </p>
+                      <p class="text-xs text-zinc-500 dark:text-zinc-400">
+                        {{ member.commentsCount }} comment{{ member.commentsCount === 1 ? "" : "s" }}
+                      </p>
+                    </div>
+                  </button>
                 </li>
               </ul>
             </section>
