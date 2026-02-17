@@ -33,6 +33,12 @@ const ALLOWED_ROLES = ["member", "admin"];
 const COVER_ENRICHMENT_ENABLED =
   String(process.env.COVER_ENRICHMENT_ENABLED || "true").trim().toLowerCase() !== "false";
 const COVER_LOOKUP_TIMEOUT_MS = Math.max(500, Number(process.env.COVER_LOOKUP_TIMEOUT_MS || 3000));
+const DEV_MEMBER_ACCOUNT_ENABLED =
+  process.env.NODE_ENV !== "production" &&
+  String(process.env.DEV_MEMBER_ACCOUNT_ENABLED || "true").trim().toLowerCase() !== "false";
+const DEV_MEMBER_NAME = (process.env.DEV_MEMBER_NAME || "Demo Member").trim();
+const DEV_MEMBER_EMAIL = (process.env.DEV_MEMBER_EMAIL || "member@example.com").trim().toLowerCase();
+const DEV_MEMBER_PASSWORD = process.env.DEV_MEMBER_PASSWORD || "bookclub123";
 
 if (JWT_SECRET === "dev-only-change-me") {
   console.warn(
@@ -421,6 +427,52 @@ function syncAdminRoleForConfiguredEmail(user) {
 
   db.prepare("UPDATE users SET role = 'admin', is_approved = 1 WHERE id = ?").run(user.id);
   return { ...user, role: "admin", isApproved: true };
+}
+
+async function ensureDevMemberAccount() {
+  if (!DEV_MEMBER_ACCOUNT_ENABLED) return;
+  if (!DEV_MEMBER_EMAIL || !DEV_MEMBER_PASSWORD) return;
+  if (ADMIN_EMAIL && DEV_MEMBER_EMAIL === ADMIN_EMAIL) {
+    console.warn("DEV_MEMBER_EMAIL matches ADMIN_EMAIL; skipping dev member seed.");
+    return;
+  }
+
+  const passwordHash = await argon2.hash(DEV_MEMBER_PASSWORD, {
+    type: argon2.argon2id,
+    memoryCost: 19456,
+    timeCost: 2,
+    parallelism: 1
+  });
+  const now = new Date().toISOString();
+
+  const existing = db
+    .prepare("SELECT id FROM users WHERE email = ?")
+    .get(DEV_MEMBER_EMAIL);
+  let userId;
+
+  if (existing) {
+    db.prepare(
+      `
+      UPDATE users
+      SET name = ?, password_hash = ?, role = 'member', is_approved = 1
+      WHERE id = ?
+    `
+    ).run(DEV_MEMBER_NAME || "Demo Member", passwordHash, existing.id);
+    userId = existing.id;
+  } else {
+    const result = db.prepare(
+      `
+      INSERT INTO users (name, email, password_hash, role, is_approved, created_at)
+      VALUES (?, ?, ?, 'member', 1, ?)
+    `
+    ).run(DEV_MEMBER_NAME || "Demo Member", DEV_MEMBER_EMAIL, passwordHash, now);
+    userId = Number(result.lastInsertRowid);
+  }
+
+  const hasBooks = db.prepare("SELECT COUNT(*) AS count FROM books WHERE user_id = ?").get(userId).count > 0;
+  if (!hasBooks) {
+    seedBooksForUser(userId);
+  }
 }
 
 function volumeToLegacyYear(volume) {
@@ -2121,6 +2173,17 @@ app.use((error, _req, res, _next) => {
   return res.status(500).json({ error: "Unexpected server error." });
 });
 
-app.listen(PORT, () => {
-  console.log(`API listening on http://127.0.0.1:${PORT}`);
+async function startServer() {
+  await ensureDevMemberAccount();
+  app.listen(PORT, () => {
+    console.log(`API listening on http://127.0.0.1:${PORT}`);
+    if (DEV_MEMBER_ACCOUNT_ENABLED) {
+      console.log(`Dev member account ready: ${DEV_MEMBER_EMAIL}`);
+    }
+  });
+}
+
+startServer().catch((error) => {
+  console.error("Failed to start API:", error);
+  process.exit(1);
 });

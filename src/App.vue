@@ -1,13 +1,28 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref, watch, watchEffect } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch, watchEffect } from "vue";
 import FlatPickr from "vue-flatpickr-component";
 import "flatpickr/dist/flatpickr.min.css";
 import { useRoute, useRouter } from "vue-router";
 
 const THEME_KEY = "bookclub.theme.v1";
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || "/api").replace(/\/$/, "");
+const DEV_QUICK_LOGIN_ENABLED =
+  import.meta.env.DEV &&
+  String(import.meta.env.VITE_DEV_QUICK_LOGIN_ENABLED || "true").trim().toLowerCase() !== "false";
+const DEMO_ACCOUNTS = DEV_QUICK_LOGIN_ENABLED
+  ? [
+      {
+        id: "member",
+        label: "Demo Member",
+        email: import.meta.env.VITE_DEV_MEMBER_EMAIL || "member@example.com",
+        password: import.meta.env.VITE_DEV_MEMBER_PASSWORD || "bookclub123"
+      }
+    ]
+  : [];
 const route = useRoute();
 const router = useRouter();
+const headerRef = ref(null);
+const headerOffset = ref(0);
 
 const loading = ref(true);
 const submittingAuth = ref(false);
@@ -33,6 +48,7 @@ const authForm = ref({
   email: "",
   password: ""
 });
+const selectedDemoAccountId = ref(DEMO_ACCOUNTS[0]?.id || "");
 
 const currentVolume = ref(2);
 const pastVolume = ref(1);
@@ -84,6 +100,7 @@ const meetingDateConfig = {
 
 const PENDING_USERS_POLL_MS = 30_000;
 let pendingUsersPollTimerId;
+let headerResizeObserver;
 
 const selectedVolumeBooks = computed(() => {
   const volumeGroup = volumes.value.find((group) => group.volume === selectedVolume.value);
@@ -185,10 +202,24 @@ watch(
 
 onMounted(async () => {
   await bootstrap();
+  await nextTick();
+  updateHeaderOffset();
+  window.addEventListener("resize", updateHeaderOffset);
+  if (typeof ResizeObserver !== "undefined" && headerRef.value) {
+    headerResizeObserver = new ResizeObserver(() => {
+      updateHeaderOffset();
+    });
+    headerResizeObserver.observe(headerRef.value);
+  }
 });
 
 onUnmounted(() => {
   stopPendingUsersPolling();
+  if (headerResizeObserver) {
+    headerResizeObserver.disconnect();
+    headerResizeObserver = undefined;
+  }
+  window.removeEventListener("resize", updateHeaderOffset);
 });
 
 function loadTheme() {
@@ -204,6 +235,32 @@ function loadTheme() {
 
 function resetAuthError() {
   errorMessage.value = "";
+}
+
+function updateHeaderOffset() {
+  const height = headerRef.value?.getBoundingClientRect().height || 0;
+  headerOffset.value = Math.ceil(height);
+}
+
+function getSelectedDemoAccount() {
+  return DEMO_ACCOUNTS.find((account) => account.id === selectedDemoAccountId.value) || null;
+}
+
+function fillDemoCredentials() {
+  const account = getSelectedDemoAccount();
+  if (!account) return;
+  authMode.value = "login";
+  authForm.value = {
+    name: "",
+    email: account.email,
+    password: account.password
+  };
+  resetAuthError();
+}
+
+async function signInDemoAccount() {
+  fillDemoCredentials();
+  await submitAuth();
 }
 
 function formatDate(value) {
@@ -945,6 +1002,12 @@ function openVolume(volume) {
   router.push("/");
 }
 
+function goHome() {
+  activeView.value = "volume";
+  showVolumeMenu.value = false;
+  router.push("/");
+}
+
 function openBookDetails(bookId) {
   showVolumeMenu.value = false;
   router.push(`/books/${encodeURIComponent(bookId)}`);
@@ -968,14 +1031,20 @@ function closeMemberProfile() {
 
 <template>
   <main class="min-h-screen bg-zinc-100 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
-    <div class="mx-auto max-w-6xl px-4 py-8 sm:px-6 lg:px-8">
-      <header class="relative left-1/2 mb-6 w-screen -translate-x-1/2 px-4 sm:px-6 lg:px-8">
-        <div class="mx-auto flex w-full max-w-screen-2xl flex-wrap items-center justify-between gap-3">
+    <header
+      ref="headerRef"
+      class="fixed inset-x-0 top-0 z-40 border-b border-zinc-200 bg-zinc-100/95 backdrop-blur dark:border-zinc-800 dark:bg-zinc-950/95"
+    >
+      <div class="mx-auto flex w-full max-w-screen-2xl flex-wrap items-center justify-between gap-3 px-4 py-4 sm:px-6 lg:px-8">
           <div class="flex min-w-0 flex-wrap items-center gap-3 sm:gap-6">
-            <div>
+            <button
+              type="button"
+              class="text-left transition hover:opacity-90"
+              @click="goHome"
+            >
               <h1 class="text-4xl font-bold tracking-tight">Stout Hearts</h1>
               <p class="mt-1 text-zinc-600 dark:text-zinc-400">Book club tracker</p>
-            </div>
+            </button>
             <nav v-if="user" class="flex flex-wrap items-center gap-2">
               <div class="relative">
                 <button
@@ -1081,8 +1150,10 @@ function closeMemberProfile() {
               <span class="sr-only">{{ isDark ? "Switch to light mode" : "Switch to dark mode" }}</span>
             </button>
           </div>
-        </div>
-      </header>
+      </div>
+    </header>
+
+    <div class="mx-auto max-w-6xl px-4 pb-8 sm:px-6 lg:px-8" :style="{ paddingTop: `${headerOffset + 24}px` }">
 
       <section v-if="loading" class="panel">
         <p>Loading...</p>
@@ -1144,6 +1215,34 @@ function closeMemberProfile() {
                 : "Already have an account? Sign in"
             }}
           </button>
+
+          <section
+            v-if="DEMO_ACCOUNTS.length > 0"
+            class="mt-5 rounded-xl border border-dashed border-zinc-300 bg-zinc-50 p-3 dark:border-zinc-700 dark:bg-zinc-900/40"
+          >
+            <p class="text-xs font-semibold uppercase tracking-wide text-zinc-600 dark:text-zinc-300">
+              Dev Quick Login
+            </p>
+            <div class="mt-2 grid gap-2 sm:grid-cols-[1fr,auto,auto] sm:items-end">
+              <label class="field-label">
+                Account
+                <select v-model="selectedDemoAccountId" class="input">
+                  <option v-for="account in DEMO_ACCOUNTS" :key="account.id" :value="account.id">
+                    {{ account.label }}
+                  </option>
+                </select>
+              </label>
+              <button class="btn-secondary" type="button" @click="fillDemoCredentials">
+                Fill
+              </button>
+              <button class="btn-primary" type="button" :disabled="submittingAuth" @click="signInDemoAccount">
+                {{ submittingAuth ? "Signing in..." : "Sign in demo" }}
+              </button>
+            </div>
+            <p class="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
+              Development only.
+            </p>
+          </section>
         </article>
       </section>
 
