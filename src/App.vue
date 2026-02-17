@@ -46,6 +46,7 @@ const user = ref(null);
 const authMode = ref("login");
 const activeView = ref("volume");
 const adminSettingsExpanded = ref(false);
+const adminTab = ref("single");
 
 const authForm = ref({
   name: "",
@@ -64,9 +65,23 @@ const uploadHistory = ref([]);
 const pendingUsers = ref([]);
 const approvingUserId = ref("");
 const uploadMode = ref("append");
-const uploadVolumePreset = ref("current");
-const uploadVolume = ref(2);
 const readingListFile = ref(null);
+const singleRecordSubmitting = ref(false);
+const singleRecordIsbnLookupLoading = ref(false);
+const lastSingleRecordLookupIsbn = ref("");
+const singleRecordLookupMessage = ref("");
+const singleRecordLookupMessageTone = ref("success");
+const singleRecordSession = ref([]);
+const singleRecordForm = ref({
+  volume: "",
+  title: "",
+  author: "",
+  month: "",
+  year: "",
+  isbn: "",
+  thumbnailUrl: "",
+  featuredImageUrl: ""
+});
 const pendingRequestCount = computed(() => pendingUsers.value.length);
 const dashboardStats = ref({
   booksRead: 0,
@@ -101,7 +116,6 @@ const coverMessageTone = ref("success");
 const coverForm = ref({
   thumbnailUrl: ""
 });
-const featuredImageFile = ref(null);
 const featuredImageMessage = ref("");
 const featuredImageMessageTone = ref("success");
 const meetingForm = ref({
@@ -143,6 +157,50 @@ const selectedBook = computed(() => {
   }
   return null;
 });
+const selectedBookCompletionStats = computed(() => {
+  const participants = Math.max(Number(selectedBook.value?.participantsCount || 0), 0);
+  const completed = Math.max(Number(selectedBook.value?.completedCount || 0), 0);
+  const clampedCompleted = participants > 0 ? Math.min(completed, participants) : completed;
+  const percent = participants > 0 ? Math.round((clampedCompleted / participants) * 100) : 0;
+  return {
+    participants,
+    completed: clampedCompleted,
+    remaining: Math.max(participants - clampedCompleted, 0),
+    percent
+  };
+});
+const selectedBookMeetingActions = computed(() => {
+  const book = selectedBook.value;
+  if (!book?.meetingStartsAt) {
+    return { calendarUrl: "", mapUrl: "" };
+  }
+  const startsAt = new Date(book.meetingStartsAt);
+  if (Number.isNaN(startsAt.getTime())) {
+    return { calendarUrl: "", mapUrl: "" };
+  }
+  const endsAt = new Date(startsAt.getTime() + 90 * 60 * 1000);
+  const title = `Stouthearts Book Club: ${book.title}`;
+  const details = [
+    `Discussion of "${book.title}" by ${book.author}.`,
+    `Volume ${book.volume}`,
+    book.meetingLocation ? `Location: ${book.meetingLocation}` : ""
+  ]
+    .filter(Boolean)
+    .join("\n");
+  const params = new URLSearchParams({
+    action: "TEMPLATE",
+    text: title,
+    dates: `${toGoogleCalendarDate(startsAt)}/${toGoogleCalendarDate(endsAt)}`,
+    details,
+    location: book.meetingLocation || ""
+  });
+  return {
+    calendarUrl: `https://calendar.google.com/calendar/render?${params.toString()}`,
+    mapUrl: book.meetingLocation
+      ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(book.meetingLocation)}`
+      : ""
+  };
+});
 const viewingBookDetails = computed(() => Boolean(routeBookId.value));
 const viewingMemberProfile = computed(() => routeMemberId.value !== null);
 const isOwnProfile = computed(
@@ -164,6 +222,20 @@ const greetingMessage = computed(() => {
   if (hour < 18) return "Good afternoon";
   return "Good evening";
 });
+const MONTH_OPTIONS = [
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December"
+];
 
 watch(isDark, (value) => {
   localStorage.setItem(THEME_KEY, value ? "dark" : "light");
@@ -201,7 +273,6 @@ watch(selectedBook, (value) => {
     isbnMessage.value = "";
     resetCoverForm(value);
     coverMessage.value = "";
-    featuredImageFile.value = null;
     featuredImageMessage.value = "";
     resetMeetingForm(value);
     meetingMessage.value = "";
@@ -359,6 +430,10 @@ function toTimeInput(value) {
   return local ? local.slice(11, 16) : "";
 }
 
+function toGoogleCalendarDate(value) {
+  return value.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+}
+
 async function api(path, options = {}) {
   const isFormData = options.body instanceof FormData;
   const headers = {
@@ -434,8 +509,8 @@ async function loadBooks() {
     const preferred = groupedVolumes.find((group) => group.volume === payload.currentVolume);
     selectedVolume.value = preferred?.volume ?? groupedVolumes[0].volume;
   }
-  if (!uploadVolume.value) {
-    uploadVolume.value = payload.currentVolume;
+  if (!singleRecordForm.value.volume) {
+    singleRecordForm.value.volume = String(payload.currentVolume || "");
   }
 }
 
@@ -577,13 +652,9 @@ async function clearBookCover() {
   await saveBookCover();
 }
 
-function setBookFeaturedImageFile(event) {
-  featuredImageFile.value = event.target.files?.[0] || null;
-}
-
-async function uploadBookFeaturedImage() {
+async function uploadBookFeaturedImage(file) {
   if (!isAdmin.value || !selectedBook.value) return;
-  if (!featuredImageFile.value) {
+  if (!file) {
     featuredImageMessageTone.value = "error";
     featuredImageMessage.value = "Choose an image file first.";
     return;
@@ -593,12 +664,11 @@ async function uploadBookFeaturedImage() {
   uploadingBookFeaturedImage.value = true;
   try {
     const formData = new FormData();
-    formData.append("file", featuredImageFile.value);
+    formData.append("file", file);
     await api(`/admin/books/${encodeURIComponent(selectedBook.value.id)}/featured-image`, {
       method: "POST",
       body: formData
     });
-    featuredImageFile.value = null;
     await loadBooks();
     featuredImageMessageTone.value = "success";
     featuredImageMessage.value = "Featured image uploaded.";
@@ -619,7 +689,6 @@ async function clearBookFeaturedImage() {
     await api(`/admin/books/${encodeURIComponent(selectedBook.value.id)}/featured-image`, {
       method: "DELETE"
     });
-    featuredImageFile.value = null;
     await loadBooks();
     featuredImageMessageTone.value = "success";
     featuredImageMessage.value = "Featured image cleared.";
@@ -629,6 +698,14 @@ async function clearBookFeaturedImage() {
   } finally {
     uploadingBookFeaturedImage.value = false;
   }
+}
+
+async function onHeaderFeaturedImageSelected(event) {
+  const input = event.target;
+  const file = input.files?.[0] || null;
+  input.value = "";
+  if (!file) return;
+  await uploadBookFeaturedImage(file);
 }
 
 async function saveBookMeeting() {
@@ -864,8 +941,10 @@ async function logout() {
     isbnMessage.value = "";
     coverForm.value = { thumbnailUrl: "" };
     coverMessage.value = "";
-    featuredImageFile.value = null;
     featuredImageMessage.value = "";
+    adminTab.value = "single";
+    singleRecordSession.value = [];
+    resetSingleRecordForm();
     activeView.value = "volume";
     await router.push("/");
   }
@@ -980,11 +1059,134 @@ function setReadingListFile(event) {
   readingListFile.value = event.target.files?.[0] || null;
 }
 
-function getUploadVolume() {
-  if (uploadVolumePreset.value === "csv") return undefined;
-  if (uploadVolumePreset.value === "current") return currentVolume.value;
-  if (uploadVolumePreset.value === "past") return pastVolume.value;
-  return uploadVolume.value;
+function resetSingleRecordForm() {
+  singleRecordForm.value = {
+    volume: String(currentVolume.value || ""),
+    title: "",
+    author: "",
+    month: "",
+    year: "",
+    isbn: "",
+    thumbnailUrl: "",
+    featuredImageUrl: ""
+  };
+  lastSingleRecordLookupIsbn.value = "";
+  singleRecordLookupMessage.value = "";
+}
+
+function clearSingleRecordSession() {
+  singleRecordSession.value = [];
+}
+
+function normalizeIsbnInput(value) {
+  const compact = String(value || "")
+    .replace(/[^0-9Xx]/g, "")
+    .toUpperCase();
+  if (!compact) return "";
+  return /^(?:\d{9}[\dX]|\d{13})$/.test(compact) ? compact : "";
+}
+
+async function autofillSingleRecordFromIsbn(force = false) {
+  const normalizedIsbn = normalizeIsbnInput(singleRecordForm.value.isbn);
+  if (!normalizedIsbn) {
+    if (force) {
+      singleRecordLookupMessageTone.value = "error";
+      singleRecordLookupMessage.value = "Enter a valid ISBN-10 or ISBN-13 first.";
+    }
+    return;
+  }
+  if (!force && normalizedIsbn === lastSingleRecordLookupIsbn.value) return;
+
+  singleRecordIsbnLookupLoading.value = true;
+  singleRecordLookupMessage.value = "";
+  try {
+    const payload = await api("/admin/reading-list/isbn-lookup", {
+      method: "POST",
+      body: JSON.stringify({ isbn: normalizedIsbn })
+    });
+    const book = payload.book || {};
+    singleRecordForm.value.isbn = book.isbn || normalizedIsbn;
+    if (book.title) singleRecordForm.value.title = book.title;
+    if (book.author) singleRecordForm.value.author = book.author;
+    if (book.thumbnailUrl) singleRecordForm.value.thumbnailUrl = book.thumbnailUrl;
+    if (!singleRecordForm.value.month && book.month) {
+      singleRecordForm.value.month = book.month;
+    }
+    lastSingleRecordLookupIsbn.value = normalizedIsbn;
+    singleRecordLookupMessageTone.value = "success";
+    singleRecordLookupMessage.value = "Autofilled available fields from ISBN.";
+  } catch (error) {
+    singleRecordLookupMessageTone.value = "error";
+    singleRecordLookupMessage.value = error.message;
+  } finally {
+    singleRecordIsbnLookupLoading.value = false;
+  }
+}
+
+async function submitSingleRecord() {
+  adminMessage.value = "";
+  const featuredImageUrl = singleRecordForm.value.featuredImageUrl.trim();
+  const payload = {
+    mode: uploadMode.value,
+    volume: Number(singleRecordForm.value.volume),
+    title: singleRecordForm.value.title.trim(),
+    author: singleRecordForm.value.author.trim(),
+    month: singleRecordForm.value.month,
+    year: Number(singleRecordForm.value.year),
+    isbn: singleRecordForm.value.isbn.trim(),
+    thumbnailUrl: singleRecordForm.value.thumbnailUrl.trim(),
+    featuredImageUrl: featuredImageUrl || undefined
+  };
+
+  if (
+    !Number.isInteger(payload.volume) ||
+    payload.volume < 1 ||
+    payload.volume > 99 ||
+    !payload.title ||
+    !payload.author ||
+    !payload.month ||
+    !Number.isInteger(payload.year) ||
+    payload.year < 2025 ||
+    payload.year > 2100 ||
+    !payload.isbn ||
+    !payload.thumbnailUrl
+  ) {
+    adminMessageTone.value = "error";
+    adminMessage.value = "Complete all required fields before adding a record.";
+    return;
+  }
+  if (payload.featuredImageUrl) {
+    try {
+      new URL(payload.featuredImageUrl);
+    } catch {
+      adminMessageTone.value = "error";
+      adminMessage.value = "Featured image URL must be a valid URL.";
+      return;
+    }
+  }
+
+  singleRecordSubmitting.value = true;
+  try {
+    const response = await api("/admin/reading-list/record", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+    await loadBooks();
+    await loadDashboard();
+    await loadUploadHistory();
+    singleRecordSession.value.unshift({
+      id: `${Date.now()}-${Math.random()}`,
+      ...payload
+    });
+    adminMessageTone.value = "success";
+    adminMessage.value = `Added 1 record for Volume ${payload.volume}. Inserted ${response.summary.booksInserted}, updated ${response.summary.booksUpdated}.`;
+    resetSingleRecordForm();
+  } catch (error) {
+    adminMessageTone.value = "error";
+    adminMessage.value = error.message;
+  } finally {
+    singleRecordSubmitting.value = false;
+  }
 }
 
 async function uploadReadingList() {
@@ -995,21 +1197,8 @@ async function uploadReadingList() {
     return;
   }
 
-  const selectedVolume = getUploadVolume();
-  if (
-    selectedVolume !== undefined &&
-    (!Number.isInteger(Number(selectedVolume)) || Number(selectedVolume) < 1 || Number(selectedVolume) > 99)
-  ) {
-    adminMessageTone.value = "error";
-    adminMessage.value = "Select a valid volume between 1 and 99.";
-    return;
-  }
-
   const formData = new FormData();
   formData.append("mode", uploadMode.value);
-  if (selectedVolume !== undefined) {
-    formData.append("volume", String(selectedVolume));
-  }
   formData.append("file", readingListFile.value);
 
   uploadingReadingList.value = true;
@@ -1022,9 +1211,7 @@ async function uploadReadingList() {
     await loadDashboard();
     await loadUploadHistory();
     adminMessageTone.value = "success";
-    const volumeLabel =
-      selectedVolume === undefined ? "volumes from CSV" : `Volume ${selectedVolume}`;
-    adminMessage.value = `Imported ${payload.summary.rowsReceived} row(s) for ${volumeLabel}. Inserted ${payload.summary.booksInserted}, updated ${payload.summary.booksUpdated}.`;
+    adminMessage.value = `Imported ${payload.summary.rowsReceived} row(s) from CSV volumes. Inserted ${payload.summary.booksInserted}, updated ${payload.summary.booksUpdated}.`;
     readingListFile.value = null;
   } catch (error) {
     adminMessageTone.value = "error";
@@ -1036,19 +1223,14 @@ async function uploadReadingList() {
 
 async function clearVolumeBooks() {
   adminMessage.value = "";
-  const selectedVolume = getUploadVolume();
-  if (
-    selectedVolume === undefined ||
-    !Number.isInteger(Number(selectedVolume)) ||
-    Number(selectedVolume) < 1 ||
-    Number(selectedVolume) > 99
-  ) {
+  const rawInput = window.prompt("Enter the Volume number to clear (1-99):", "");
+  if (rawInput === null) return;
+  const volume = Number(rawInput);
+  if (!Number.isInteger(volume) || volume < 1 || volume > 99) {
     adminMessageTone.value = "error";
-    adminMessage.value = "Select Current, Past, or Custom volume to clear.";
+    adminMessage.value = "Enter a valid volume number between 1 and 99.";
     return;
   }
-
-  const volume = Number(selectedVolume);
   const confirmed = window.confirm(
     `This will permanently delete all books and comments in Volume ${volume} for every user. Continue?`
   );
@@ -1185,10 +1367,10 @@ function closeMemberProfile() {
 </script>
 
 <template>
-  <main class="min-h-screen bg-zinc-100 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
+  <main class="min-h-screen bg-[#F2EFDF] text-[#23260F] dark:bg-[#23260F] dark:text-[#F2EFDF]">
     <header
       ref="headerRef"
-      class="fixed inset-x-0 top-0 z-40 border-b border-zinc-200 bg-zinc-100/95 backdrop-blur dark:border-zinc-800 dark:bg-zinc-950/95"
+      class="fixed inset-x-0 top-0 z-40 border-b border-[#9BA7BF]/50 bg-[#F2EFDF]/95 backdrop-blur dark:border-[#3B4013] dark:bg-[#23260F]/95"
     >
       <div class="mx-auto flex w-full max-w-screen-2xl flex-wrap items-center justify-between gap-3 px-4 py-4 sm:px-6 lg:px-8">
           <div class="flex min-w-0 flex-wrap items-center gap-3 sm:gap-6">
@@ -1414,49 +1596,117 @@ function closeMemberProfile() {
                 <p class="text-sm text-zinc-600 dark:text-zinc-400">Volume {{ selectedBook.volume }}</p>
                 <p
                   v-if="selectedBook.isFeatured"
-                  class="text-xs font-semibold uppercase tracking-wide text-emerald-700 dark:text-emerald-300"
+                  class="text-xs font-semibold uppercase tracking-wide text-[#607EA6] dark:text-[#9BA7BF]"
                 >
                   Featured for Volume
                 </p>
               </div>
             </div>
 
-            <section class="overflow-hidden rounded-xl border border-zinc-200 dark:border-zinc-700">
-              <div v-if="selectedBook.featuredImageUrl" class="relative h-36 sm:h-44">
+            <section class="overflow-visible rounded-xl bg-zinc-50/50 dark:bg-zinc-900/20">
+              <div class="relative h-44 overflow-hidden rounded-t-xl sm:h-56">
                 <img
+                  v-if="selectedBook.featuredImageUrl"
                   :src="selectedBook.featuredImageUrl"
                   :alt="`Featured header for ${selectedBook.title}`"
                   class="absolute inset-0 h-full w-full object-cover"
+                  style="
+                    -webkit-mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 1) 62%, rgba(0, 0, 0, 0) 100%);
+                    mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 1) 62%, rgba(0, 0, 0, 0) 100%);
+                  "
                 />
-                <div class="absolute inset-0 bg-gradient-to-t from-black/70 via-black/20 to-transparent"></div>
-                <div class="relative z-10 flex h-full items-end p-4">
-                  <p class="text-xs font-semibold uppercase tracking-wide text-zinc-100">
-                    Featured Header Image
-                  </p>
+                <div
+                  v-else
+                  class="absolute inset-0 flex items-center justify-center bg-zinc-100 text-xs font-medium text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400"
+                >
+                  No featured header image uploaded yet.
                 </div>
+                <div class="absolute inset-0 bg-gradient-to-b from-zinc-950/25 via-zinc-950/5 to-transparent"></div>
+                <label
+                  v-if="isAdmin"
+                  class="absolute right-3 top-3 z-20 flex h-9 w-9 cursor-pointer items-center justify-center rounded-full border border-white/60 bg-black/45 text-white shadow transition hover:bg-black/65"
+                  :class="uploadingBookFeaturedImage ? 'pointer-events-none opacity-60' : ''"
+                  title="Upload featured header image"
+                  aria-label="Upload featured header image"
+                >
+                  <input
+                    class="sr-only"
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp,image/gif"
+                    :disabled="uploadingBookFeaturedImage"
+                    @change="onHeaderFeaturedImageSelected"
+                  />
+                  <svg
+                    class="h-4 w-4"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    aria-hidden="true"
+                  >
+                    <path d="M12 16V6"></path>
+                    <path d="m8 10 4-4 4 4"></path>
+                    <path d="M4 18.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5"></path>
+                  </svg>
+                </label>
               </div>
-              <div
-                v-else
-                class="flex h-20 items-center justify-center bg-zinc-100 text-xs font-medium text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400"
-              >
-                No featured header image uploaded yet.
-              </div>
-            </section>
-
-            <div class="grid gap-4 sm:grid-cols-[140px,1fr]">
-              <div class="h-52 w-36 overflow-hidden rounded-lg border border-zinc-200 bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800">
-                <img
-                  v-if="selectedBook.thumbnailUrl"
-                  :src="selectedBook.thumbnailUrl"
-                  :alt="`Cover of ${selectedBook.title}`"
-                  class="h-full w-full object-cover"
-                />
-                <div v-else class="flex h-full w-full items-center justify-center text-center text-xs text-zinc-500 dark:text-zinc-400">
-                  No cover image
+              <div class="relative min-h-[10rem] px-4 pb-4 pl-36 pt-16 sm:min-h-[11rem] sm:px-6 sm:pb-6 sm:pl-48 sm:pt-8">
+                <div
+                  class="absolute -top-20 left-4 h-48 w-32 overflow-hidden rounded-lg bg-transparent shadow-lg ring-1 ring-black/10 dark:ring-white/10 sm:-top-24 sm:h-56 sm:w-36"
+                >
+                  <button
+                    v-if="isAdmin"
+                    type="button"
+                    class="absolute right-2 top-2 z-20 flex h-8 w-8 items-center justify-center rounded-full border border-white/70 bg-black/55 text-white shadow transition hover:bg-black/70"
+                    :class="
+                      selectedBook.isFeatured
+                        ? 'border-amber-300/80 bg-black/70 text-amber-300 hover:bg-black/70'
+                        : ''
+                    "
+                    :disabled="selectedBook.isFeatured || featuringBookId === selectedBook.id"
+                    :title="
+                      selectedBook.isFeatured
+                        ? 'Already the featured book for this volume'
+                        : featuringBookId === selectedBook.id
+                          ? 'Setting featured book...'
+                          : 'Set this as the featured book for this volume'
+                    "
+                    :aria-label="
+                      selectedBook.isFeatured
+                        ? 'Already the featured book for this volume'
+                        : featuringBookId === selectedBook.id
+                          ? 'Setting featured book'
+                          : 'Set this as the featured book for this volume'
+                    "
+                    @click="setFeaturedBookForVolume(selectedBook.id)"
+                  >
+                    <svg
+                      class="h-4 w-4"
+                      viewBox="0 0 24 24"
+                      fill="currentColor"
+                      aria-hidden="true"
+                    >
+                      <path
+                        d="M12 3.5 14.8 9l6.1.9-4.4 4.3 1 6.1L12 17.6l-5.5 2.7 1-6.1L3.1 9.9 9.2 9 12 3.5Z"
+                      />
+                    </svg>
+                  </button>
+                  <img
+                    v-if="selectedBook.thumbnailUrl"
+                    :src="selectedBook.thumbnailUrl"
+                    :alt="`Cover of ${selectedBook.title}`"
+                    class="h-full w-full object-contain"
+                  />
+                  <div
+                    v-else
+                    class="flex h-full w-full items-center justify-center text-center text-xs text-zinc-500 dark:text-zinc-400"
+                  >
+                    No cover image
+                  </div>
                 </div>
-              </div>
-              <div>
-                <h2 class="text-3xl font-semibold">{{ selectedBook.title }}</h2>
+                <h2 class="text-3xl font-semibold sm:text-4xl">{{ selectedBook.title }}</h2>
                 <p class="mt-1 text-zinc-700 dark:text-zinc-300">by {{ selectedBook.author }}</p>
                 <p class="mt-2 text-sm text-zinc-600 dark:text-zinc-400">
                   {{ selectedBook.month }} {{ selectedBook.year }}
@@ -1465,132 +1715,179 @@ function closeMemberProfile() {
                   ISBN: {{ selectedBook.isbn || "Not set" }}
                 </p>
               </div>
-            </div>
+            </section>
+            <p
+              v-if="featuredImageMessage"
+              class="text-sm"
+              :class="
+                featuredImageMessageTone === 'error'
+                  ? 'text-rose-600 dark:text-rose-300'
+                  : 'text-[#607EA6] dark:text-[#9BA7BF]'
+              "
+            >
+              {{ featuredImageMessage }}
+            </p>
 
-            <div class="space-y-2">
-              <h3 class="text-lg font-semibold">ISBN</h3>
-              <p class="text-sm text-zinc-700 dark:text-zinc-300">
-                {{ selectedBook.isbn || "Not set" }}
-              </p>
-            </div>
-
-            <div class="space-y-2">
-              <h3 class="text-lg font-semibold">Cover Image</h3>
-              <p class="text-sm text-zinc-600 dark:text-zinc-400">
-                Current cover image shown in cards and details.
-              </p>
-              <p v-if="selectedBook.thumbnailUrl" class="text-xs text-zinc-500 dark:text-zinc-400 break-all">
-                {{ selectedBook.thumbnailUrl }}
-              </p>
-              <p v-else class="text-sm text-zinc-700 dark:text-zinc-300">No cover image URL set.</p>
-            </div>
-
-            <div class="space-y-2">
-              <h3 class="text-lg font-semibold">Featured Card Image</h3>
-              <p class="text-sm text-zinc-600 dark:text-zinc-400">
-                This image appears in the Featured Book card. Upload JPG, PNG, WEBP, or GIF up to 2MB.
-              </p>
-              <div
-                class="h-48 overflow-hidden rounded-lg border border-zinc-200 bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800"
-              >
-                <img
-                  v-if="selectedBook.featuredImageUrl"
-                  :src="selectedBook.featuredImageUrl"
-                  :alt="`Featured image for ${selectedBook.title}`"
-                  class="h-full w-full object-cover"
-                />
-                <div
-                  v-else
-                  class="flex h-full w-full items-center justify-center text-center text-xs text-zinc-500 dark:text-zinc-400"
-                >
-                  No featured image
-                </div>
-              </div>
-            </div>
-
-            <div class="space-y-2">
-              <h3 class="text-lg font-semibold">Reading Status</h3>
-              <p v-if="selectedBook.isCompleted" class="text-sm text-emerald-700 dark:text-emerald-300">
-                Completed
-                <span v-if="selectedBook.completedAt">
-                  on {{ formatDate(selectedBook.completedAt) }} at {{ formatCommentTime(selectedBook.completedAt) }}
-                </span>
-              </p>
-              <p v-else class="text-sm text-zinc-600 dark:text-zinc-400">Not completed yet.</p>
-              <button
-                class="btn-secondary"
-                :disabled="completingBookId === selectedBook.id"
-                @click="setBookCompletion(selectedBook.id, !selectedBook.isCompleted)"
-              >
-                {{
-                  completingBookId === selectedBook.id
-                    ? "Saving..."
-                    : selectedBook.isCompleted
-                      ? "Mark as Not Completed"
-                      : "Mark as Completed"
-                }}
-              </button>
-
-              <div class="pt-2">
-                <p class="text-sm text-zinc-700 dark:text-zinc-300">
-                  Average rating:
-                  <span v-if="selectedBook.ratingsCount > 0" class="font-semibold">
-                    {{ selectedBook.averageRating.toFixed(1) }}/5
-                    ({{ selectedBook.ratingsCount }} rating{{ selectedBook.ratingsCount === 1 ? "" : "s" }})
+            <div class="grid gap-4 lg:grid-cols-[1.4fr,1fr]">
+              <article class="card space-y-3">
+                <div class="flex flex-wrap items-center justify-between gap-2">
+                  <h3 class="text-xl font-semibold">Reading Status</h3>
+                  <span class="rounded-full bg-[#F2EFDF] px-3 py-1 text-xs font-semibold text-[#3B4013] dark:bg-[#23260F]/60 dark:text-[#F2EFDF]">
+                    {{ selectedBookCompletionStats.completed }} / {{ selectedBookCompletionStats.participants }} completed
                   </span>
-                  <span v-else class="text-zinc-600 dark:text-zinc-400">No ratings yet</span>
+                </div>
+                <div class="h-2 w-full overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700">
+                  <div
+                    class="h-full rounded-full bg-[#607EA6] transition-[width] duration-500 dark:bg-[#9BA7BF]"
+                    :style="{ width: `${selectedBookCompletionStats.percent}%` }"
+                  ></div>
+                </div>
+                <p class="text-sm text-zinc-600 dark:text-zinc-400">
+                  {{
+                    selectedBookCompletionStats.participants > 0
+                      ? `${selectedBookCompletionStats.remaining} member${selectedBookCompletionStats.remaining === 1 ? "" : "s"} still reading.`
+                      : "Member completion stats will appear as members mark this book complete."
+                  }}
                 </p>
 
-                <div v-if="selectedBook.isCompleted" class="mt-2 flex flex-wrap items-center gap-2">
-                  <p class="text-sm text-zinc-700 dark:text-zinc-300">Your rating:</p>
-                  <div class="flex items-center gap-1">
-                    <button
-                      v-for="star in 5"
-                      :key="`rate-${selectedBook.id}-${star}`"
-                      type="button"
-                      class="rounded px-1 text-xl leading-none transition"
-                      :class="
-                        (selectedBook.userRating || 0) >= star
-                          ? 'text-amber-500 hover:text-amber-400'
-                          : 'text-zinc-400 hover:text-zinc-500 dark:text-zinc-500 dark:hover:text-zinc-300'
-                      "
-                      :disabled="ratingBookId === selectedBook.id"
-                      @click="setBookRating(selectedBook.id, star)"
-                    >
-                      ★
-                    </button>
-                  </div>
+                <div class="flex flex-wrap items-center gap-2">
+                  <p v-if="selectedBook.isCompleted" class="text-sm text-[#607EA6] dark:text-[#9BA7BF]">
+                    Completed
+                    <span v-if="selectedBook.completedAt">
+                      on {{ formatDate(selectedBook.completedAt) }} at {{ formatCommentTime(selectedBook.completedAt) }}
+                    </span>
+                  </p>
+                  <p v-else class="text-sm text-zinc-600 dark:text-zinc-400">Not completed yet.</p>
                   <button
-                    v-if="selectedBook.userRating"
-                    type="button"
-                    class="btn-secondary px-2 py-1 text-xs"
-                    :disabled="ratingBookId === selectedBook.id"
-                    @click="clearBookRating(selectedBook.id)"
+                    class="btn-secondary"
+                    :disabled="completingBookId === selectedBook.id"
+                    @click="setBookCompletion(selectedBook.id, !selectedBook.isCompleted)"
                   >
-                    {{ ratingBookId === selectedBook.id ? "Saving..." : "Clear Rating" }}
+                    {{
+                      completingBookId === selectedBook.id
+                        ? "Saving..."
+                        : selectedBook.isCompleted
+                          ? "Mark as Not Completed"
+                          : "Mark as Completed"
+                    }}
                   </button>
                 </div>
-                <p v-else class="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
-                  Mark this book completed to leave a rating.
-                </p>
-              </div>
-            </div>
 
-            <div class="space-y-2">
-              <h3 class="text-lg font-semibold">Meeting</h3>
-              <p
-                v-if="selectedBook.meetingStartsAt"
-                class="text-sm text-zinc-700 dark:text-zinc-300"
-              >
-                {{ formatEventDate(selectedBook.meetingStartsAt) }} at
-                {{ formatEventTime(selectedBook.meetingStartsAt) }}
-                <span v-if="selectedBook.meetingLocation">
-                  | {{ selectedBook.meetingLocation }}
-                </span>
-              </p>
-              <p v-else class="text-sm text-zinc-600 dark:text-zinc-400">
-                No meeting set for this book yet.
-              </p>
+                <div class="border-t border-zinc-200 pt-3 dark:border-zinc-700">
+                  <p class="text-sm text-zinc-700 dark:text-zinc-300">Club Rating</p>
+                  <div class="mt-1 flex items-center gap-2">
+                    <div class="flex items-center gap-0.5 text-base">
+                      <span
+                        v-for="star in 5"
+                        :key="`avg-${selectedBook.id}-${star}`"
+                        :class="
+                          selectedBook.ratingsCount > 0 && star <= Math.round(selectedBook.averageRating || 0)
+                            ? 'text-amber-500'
+                            : 'text-zinc-300 dark:text-zinc-600'
+                        "
+                      >
+                        ★
+                      </span>
+                    </div>
+                    <p class="text-sm text-zinc-600 dark:text-zinc-400">
+                      <span v-if="selectedBook.ratingsCount > 0" class="font-semibold text-zinc-900 dark:text-zinc-100">
+                        {{ selectedBook.averageRating.toFixed(1) }}/5
+                      </span>
+                      <span>
+                        {{
+                          selectedBook.ratingsCount > 0
+                            ? ` (${selectedBook.ratingsCount} rating${selectedBook.ratingsCount === 1 ? "" : "s"})`
+                            : " No ratings yet"
+                        }}
+                      </span>
+                    </p>
+                  </div>
+                  <p v-if="selectedBook.ratingsCount === 0" class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+                    Be the first to rate after marking this book completed.
+                  </p>
+
+                  <div v-if="selectedBook.isCompleted" class="mt-3 flex flex-wrap items-center gap-2">
+                    <p class="text-sm text-zinc-700 dark:text-zinc-300">Your rating:</p>
+                    <div class="flex items-center gap-1">
+                      <button
+                        v-for="star in 5"
+                        :key="`rate-${selectedBook.id}-${star}`"
+                        type="button"
+                        class="rounded px-1 text-xl leading-none transition"
+                        :class="
+                          (selectedBook.userRating || 0) >= star
+                            ? 'text-amber-500 hover:text-amber-400'
+                            : 'text-zinc-400 hover:text-zinc-500 dark:text-zinc-500 dark:hover:text-zinc-300'
+                        "
+                        :disabled="ratingBookId === selectedBook.id"
+                        @click="setBookRating(selectedBook.id, star)"
+                      >
+                        ★
+                      </button>
+                    </div>
+                    <button
+                      v-if="selectedBook.userRating"
+                      type="button"
+                      class="btn-secondary px-2 py-1 text-xs"
+                      :disabled="ratingBookId === selectedBook.id"
+                      @click="clearBookRating(selectedBook.id)"
+                    >
+                      {{ ratingBookId === selectedBook.id ? "Saving..." : "Clear Rating" }}
+                    </button>
+                  </div>
+                </div>
+              </article>
+
+              <article class="card space-y-3">
+                <div class="flex items-center gap-2">
+                  <svg
+                    class="h-4 w-4 text-[#607EA6] dark:text-[#9BA7BF]"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    aria-hidden="true"
+                  >
+                    <rect x="3" y="4" width="18" height="18" rx="2"></rect>
+                    <path d="M16 2v4"></path>
+                    <path d="M8 2v4"></path>
+                    <path d="M3 10h18"></path>
+                  </svg>
+                  <h3 class="text-xl font-semibold">Meeting</h3>
+                </div>
+                <div v-if="selectedBook.meetingStartsAt" class="space-y-2">
+                  <p class="text-base font-semibold text-zinc-900 dark:text-zinc-100">
+                    {{ formatEventDate(selectedBook.meetingStartsAt) }} at {{ formatEventTime(selectedBook.meetingStartsAt) }}
+                  </p>
+                  <p v-if="selectedBook.meetingLocation" class="text-sm text-zinc-700 dark:text-zinc-300">
+                    {{ selectedBook.meetingLocation }}
+                  </p>
+                  <div class="flex flex-wrap items-center gap-2 pt-1">
+                    <a
+                      class="btn-secondary px-3 py-1 text-xs"
+                      :href="selectedBookMeetingActions.calendarUrl"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      Add to Calendar
+                    </a>
+                    <a
+                      v-if="selectedBookMeetingActions.mapUrl"
+                      class="btn-secondary px-3 py-1 text-xs"
+                      :href="selectedBookMeetingActions.mapUrl"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      Open Map
+                    </a>
+                  </div>
+                </div>
+                <p v-else class="text-sm text-zinc-600 dark:text-zinc-400">
+                  No meeting set for this book yet.
+                </p>
+              </article>
             </div>
 
             <section v-if="isAdmin" class="space-y-3 rounded-xl border border-zinc-200 p-4 dark:border-zinc-700">
@@ -1609,24 +1906,7 @@ function closeMemberProfile() {
                 Changes here apply to this logical book across all member records for this volume.
               </p>
 
-              <div v-if="adminSettingsExpanded" class="space-y-3">
-                <div class="card space-y-2">
-                <p class="text-sm font-semibold">Featured Book</p>
-                <button
-                  class="btn-secondary w-fit"
-                  :disabled="selectedBook.isFeatured || featuringBookId === selectedBook.id"
-                  @click="setFeaturedBookForVolume(selectedBook.id)"
-                >
-                  {{
-                    selectedBook.isFeatured
-                      ? "Featured for Volume"
-                      : featuringBookId === selectedBook.id
-                        ? "Saving..."
-                        : "Set as Featured"
-                  }}
-                </button>
-              </div>
-
+              <div v-if="adminSettingsExpanded" class="grid gap-3 lg:grid-cols-2">
               <form class="card space-y-2" @submit.prevent="saveBookIsbn">
                 <p class="text-sm font-semibold">ISBN</p>
                 <label class="field-label">
@@ -1646,7 +1926,7 @@ function closeMemberProfile() {
                   :class="
                     isbnMessageTone === 'error'
                       ? 'text-rose-600 dark:text-rose-300'
-                      : 'text-emerald-700 dark:text-emerald-300'
+                      : 'text-[#607EA6] dark:text-[#9BA7BF]'
                   "
                 >
                   {{ isbnMessage }}
@@ -1692,7 +1972,7 @@ function closeMemberProfile() {
                   :class="
                     coverMessageTone === 'error'
                       ? 'text-rose-600 dark:text-rose-300'
-                      : 'text-emerald-700 dark:text-emerald-300'
+                      : 'text-[#607EA6] dark:text-[#9BA7BF]'
                   "
                 >
                   {{ coverMessage }}
@@ -1721,45 +2001,18 @@ function closeMemberProfile() {
               </form>
 
               <div class="card space-y-2">
-                <p class="text-sm font-semibold">Featured Card Image</p>
-                <label class="field-label">
-                  Upload Featured Image
-                  <input
-                    class="input"
-                    type="file"
-                    accept="image/png,image/jpeg,image/webp,image/gif"
-                    @change="setBookFeaturedImageFile"
-                  />
-                </label>
-                <p
-                  v-if="featuredImageMessage"
-                  class="text-sm"
-                  :class="
-                    featuredImageMessageTone === 'error'
-                      ? 'text-rose-600 dark:text-rose-300'
-                      : 'text-emerald-700 dark:text-emerald-300'
-                  "
-                >
-                  {{ featuredImageMessage }}
+                <p class="text-sm font-semibold">Featured Header Image</p>
+                <p class="text-xs text-zinc-600 dark:text-zinc-400">
+                  Use the upload icon in the top-right corner of the header image to replace it.
                 </p>
-                <div class="flex gap-2">
-                  <button
-                    type="button"
-                    class="btn-primary"
-                    :disabled="uploadingBookFeaturedImage || !featuredImageFile"
-                    @click="uploadBookFeaturedImage"
-                  >
-                    {{ uploadingBookFeaturedImage ? "Uploading..." : "Upload Featured Image" }}
-                  </button>
-                  <button
-                    type="button"
-                    class="btn-danger"
-                    :disabled="uploadingBookFeaturedImage || !selectedBook.featuredImageUrl"
-                    @click="clearBookFeaturedImage"
-                  >
-                    {{ uploadingBookFeaturedImage ? "Working..." : "Clear Featured Image" }}
-                  </button>
-                </div>
+                <button
+                  type="button"
+                  class="btn-danger w-fit"
+                  :disabled="uploadingBookFeaturedImage || !selectedBook.featuredImageUrl"
+                  @click="clearBookFeaturedImage"
+                >
+                  {{ uploadingBookFeaturedImage ? "Working..." : "Clear Featured Image" }}
+                </button>
               </div>
 
               <form class="card space-y-2" @submit.prevent="saveBookMeeting">
@@ -1797,7 +2050,7 @@ function closeMemberProfile() {
                   :class="
                     meetingMessageTone === 'error'
                       ? 'text-rose-600 dark:text-rose-300'
-                      : 'text-emerald-700 dark:text-emerald-300'
+                      : 'text-[#607EA6] dark:text-[#9BA7BF]'
                   "
                 >
                   {{ meetingMessage }}
@@ -1836,7 +2089,7 @@ function closeMemberProfile() {
                 <li v-for="resource in selectedBook.resources" :key="`${resource.label}-${resource.url}`" class="comment-row">
                   <span>{{ resource.label }}</span>
                   <a
-                    class="text-sm font-medium text-emerald-700 underline dark:text-emerald-300"
+                    class="text-sm font-medium text-[#607EA6] underline dark:text-[#9BA7BF]"
                     :href="resource.url"
                     target="_blank"
                     rel="noopener noreferrer"
@@ -1959,7 +2212,7 @@ function closeMemberProfile() {
                 :class="
                   profileMessageTone === 'error'
                     ? 'text-rose-600 dark:text-rose-300'
-                    : 'text-emerald-700 dark:text-emerald-300'
+                    : 'text-[#607EA6] dark:text-[#9BA7BF]'
                 "
               >
                 {{ profileMessage }}
@@ -2071,7 +2324,7 @@ function closeMemberProfile() {
             <button
               v-if="featuredBook"
               type="button"
-              class="panel w-full overflow-hidden p-0 text-left transition hover:-translate-y-0.5 hover:border-emerald-300 dark:hover:border-emerald-600"
+              class="panel w-full overflow-hidden p-0 text-left transition hover:-translate-y-0.5 hover:border-[#B59A57] dark:hover:border-[#B59A57]"
               @click="openBookDetails(featuredBook.id)"
             >
               <div class="relative h-[30rem]">
@@ -2084,13 +2337,13 @@ function closeMemberProfile() {
                   />
                   <div
                     v-else
-                    class="flex h-full w-full items-center justify-center bg-gradient-to-br from-emerald-100 to-zinc-200 text-center text-sm font-medium text-zinc-600 dark:from-emerald-950 dark:to-zinc-900 dark:text-zinc-300"
+                    class="flex h-full w-full items-center justify-center bg-gradient-to-br from-[#F2EFDF] to-zinc-200 text-center text-sm font-medium text-zinc-600 dark:from-[#23260F] dark:to-zinc-900 dark:text-zinc-300"
                   >
                     Add a featured image from book details
                   </div>
                 </div>
                 <div class="h-1/3 p-4 sm:p-5">
-                  <p class="text-xs font-semibold uppercase tracking-wide text-emerald-700 dark:text-emerald-300">
+                  <p class="text-xs font-semibold uppercase tracking-wide text-[#607EA6] dark:text-[#9BA7BF]">
                     Featured Book
                   </p>
                   <h3 class="mt-1 text-2xl font-semibold leading-tight">{{ featuredBook.title }}</h3>
@@ -2098,7 +2351,7 @@ function closeMemberProfile() {
                   <div class="mt-2 flex flex-wrap items-center gap-2 text-xs">
                     <p
                       v-if="featuredBook.isCompleted"
-                      class="font-semibold uppercase tracking-wide text-emerald-700 dark:text-emerald-300"
+                      class="font-semibold uppercase tracking-wide text-[#607EA6] dark:text-[#9BA7BF]"
                     >
                       Completed
                     </p>
@@ -2109,7 +2362,7 @@ function closeMemberProfile() {
                   <p class="mt-2 text-sm text-zinc-600 dark:text-zinc-400">
                     {{ featuredBook.month }} {{ featuredBook.year }} in Volume {{ selectedVolumeLabel ?? currentVolume }}
                   </p>
-                  <p class="mt-2 text-sm font-medium text-emerald-700 dark:text-emerald-300">Open details</p>
+                  <p class="mt-2 text-sm font-medium text-[#607EA6] dark:text-[#9BA7BF]">Open details</p>
                 </div>
               </div>
             </button>
@@ -2135,7 +2388,7 @@ function closeMemberProfile() {
                 <li v-for="book in scheduledBooksForVolume" :key="`meeting-${book.id}`">
                   <button
                     type="button"
-                    class="card w-full text-left transition hover:-translate-y-0.5 hover:border-emerald-300 dark:hover:border-emerald-600"
+                    class="card w-full text-left transition hover:-translate-y-0.5 hover:border-[#B59A57] dark:hover:border-[#B59A57]"
                     @click="openBookDetails(book.id)"
                   >
                     <p class="font-semibold">{{ book.title }}</p>
@@ -2162,7 +2415,7 @@ function closeMemberProfile() {
                 <button
                   v-for="book in selectedVolumeBooks"
                   :key="book.id"
-                  class="card text-left transition hover:-translate-y-0.5 hover:border-emerald-300 dark:hover:border-emerald-600"
+                  class="card text-left transition hover:-translate-y-0.5 hover:border-[#B59A57] dark:hover:border-[#B59A57]"
                   @click="openBookDetails(book.id)"
                 >
                   <div class="flex gap-3">
@@ -2184,7 +2437,7 @@ function closeMemberProfile() {
                       </p>
                       <p
                         v-if="book.isCompleted"
-                        class="mt-1 text-xs font-semibold uppercase tracking-wide text-emerald-700 dark:text-emerald-300"
+                        class="mt-1 text-xs font-semibold uppercase tracking-wide text-[#607EA6] dark:text-[#9BA7BF]"
                       >
                         Completed
                       </p>
@@ -2194,7 +2447,7 @@ function closeMemberProfile() {
                       <p class="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
                         {{ book.comments.length }} comment{{ book.comments.length === 1 ? "" : "s" }}
                       </p>
-                      <p class="mt-2 text-sm font-medium text-emerald-700 dark:text-emerald-300">Open details</p>
+                      <p class="mt-2 text-sm font-medium text-[#607EA6] dark:text-[#9BA7BF]">Open details</p>
                     </div>
                   </div>
                 </button>
@@ -2212,7 +2465,7 @@ function closeMemberProfile() {
               <ul v-else class="mt-3 space-y-2">
                 <li v-for="member in members" :key="member.id">
                   <button
-                    class="comment-row w-full text-left transition hover:-translate-y-0.5 hover:border-emerald-300 dark:hover:border-emerald-600"
+                    class="comment-row w-full text-left transition hover:-translate-y-0.5 hover:border-[#B59A57] dark:hover:border-[#B59A57]"
                     @click="openMemberProfile(member.id)"
                   >
                     <div class="flex min-w-0 items-center gap-3">
@@ -2252,89 +2505,323 @@ function closeMemberProfile() {
           </section>
         </section>
 
-        <section v-else-if="activeView === 'admin' && isAdmin" class="panel space-y-3">
-          <h3 class="text-xl font-semibold">Admin: Import Reading List</h3>
-          <p class="text-sm text-zinc-600 dark:text-zinc-400">
-            Upload a CSV or JSON file for a selected volume. If your file includes a `volume`
-            column, it takes priority over the selected volume. You can also include `year`,
-            `isbn`, `meetingStartsAt`, `meetingLocation`, `thumbnailUrl`, and bookseller resource link columns.
-          </p>
-          <div class="grid gap-3 lg:grid-cols-4 lg:items-end">
-            <label class="field-label">
-              List
-              <select v-model="uploadVolumePreset" class="input">
-                <option value="current">Current Books Volume {{ currentVolume }}</option>
-                <option value="past">Past Books Volume {{ pastVolume }}</option>
-                <option value="custom">Custom Volume</option>
-                <option value="csv">Use volume column from CSV</option>
-              </select>
-            </label>
-            <label class="field-label">
-              Volume
-              <input
-                v-model.number="uploadVolume"
-                class="input"
-                type="number"
-                min="1"
-                max="99"
-                step="1"
-                :disabled="uploadVolumePreset !== 'custom'"
-              />
-            </label>
-            <label class="field-label">
-              Mode
-              <select v-model="uploadMode" class="input">
-                <option value="append">Append</option>
-                <option value="replace">Replace</option>
-              </select>
-            </label>
-            <label class="field-label">
-              File (.csv or .json)
-              <input class="input" type="file" accept=".csv,.json" @change="setReadingListFile" />
-            </label>
-            <button
-              class="btn-primary"
-              :disabled="uploadingReadingList || clearingVolume || clearingUploadHistory || backfillingCovers"
-              @click="uploadReadingList"
-            >
-              {{ uploadingReadingList ? "Uploading..." : "Import" }}
-            </button>
-            <button
-              class="btn-danger"
-              :disabled="uploadingReadingList || clearingVolume || clearingUploadHistory || backfillingCovers"
-              @click="clearVolumeBooks"
-            >
-              {{ clearingVolume ? "Clearing..." : "Clear Volume" }}
-            </button>
-            <button
-              class="btn-secondary"
-              :disabled="uploadingReadingList || clearingVolume || clearingUploadHistory || backfillingCovers"
-              @click="backfillCoverImages"
-            >
-              {{ backfillingCovers ? "Backfilling..." : "Backfill Covers" }}
-            </button>
-          </div>
-          <p
-            v-if="adminMessage"
-            class="text-sm"
-            :class="
-              adminMessageTone === 'error'
-                ? 'text-rose-600 dark:text-rose-300'
-                : 'text-emerald-700 dark:text-emerald-300'
-            "
-          >
-            {{ adminMessage }}
-          </p>
+        <section v-else-if="activeView === 'admin' && isAdmin" class="space-y-5">
+          <section class="panel space-y-4">
+            <div class="flex flex-wrap items-center gap-3">
+              <h3 class="text-2xl font-semibold">Admin: Import Reading List</h3>
+              <span
+                class="rounded border border-[#607EA6]/60 bg-[#607EA6]/10 px-2 py-0.5 text-xs font-semibold uppercase tracking-wide text-[#607EA6] dark:text-[#9BA7BF]"
+              >
+                Admin
+              </span>
+            </div>
+            <div class="h-px bg-zinc-200 dark:bg-zinc-800"></div>
+            <div class="inline-flex rounded-xl border border-zinc-200 bg-zinc-50 p-1 dark:border-zinc-700 dark:bg-zinc-900/60">
+              <button
+                type="button"
+                class="rounded-lg px-4 py-2 text-sm font-semibold transition"
+                :class="
+                  adminTab === 'single'
+                    ? 'bg-[#B59A57] text-[#23260F] dark:bg-[#B59A57] dark:text-[#23260F]'
+                    : 'text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800'
+                "
+                @click="adminTab = 'single'"
+              >
+                Single Record
+              </button>
+              <button
+                type="button"
+                class="rounded-lg px-4 py-2 text-sm font-semibold transition"
+                :class="
+                  adminTab === 'bulk'
+                    ? 'bg-[#B59A57] text-[#23260F] dark:bg-[#B59A57] dark:text-[#23260F]'
+                    : 'text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800'
+                "
+                @click="adminTab = 'bulk'"
+              >
+                Bulk Import
+              </button>
+              <button
+                type="button"
+                class="rounded-lg px-4 py-2 text-sm font-semibold transition"
+                :class="
+                  adminTab === 'approvals'
+                    ? 'bg-[#B59A57] text-[#23260F] dark:bg-[#B59A57] dark:text-[#23260F]'
+                    : 'text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800'
+                "
+                @click="adminTab = 'approvals'"
+              >
+                Approvals <span class="text-amber-500">• {{ pendingUsers.length }}</span>
+              </button>
+            </div>
+          </section>
 
-          <div class="space-y-2">
+          <section v-if="adminTab === 'single'" class="panel space-y-5">
+            <div class="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-200 pb-4 dark:border-zinc-800">
+              <p class="text-xs font-semibold uppercase tracking-[0.16em] text-zinc-600 dark:text-zinc-400">New Record</p>
+              <label class="field-label max-w-[220px]">
+                Mode
+                <select v-model="uploadMode" class="input">
+                  <option value="append">Append</option>
+                  <option value="replace">Replace</option>
+                </select>
+              </label>
+            </div>
+
+            <form class="space-y-5" @submit.prevent="submitSingleRecord">
+              <div class="grid gap-4 md:grid-cols-[minmax(0,1fr),auto] md:items-end">
+                <label class="field-label">
+                  ISBN *
+                  <input
+                    v-model="singleRecordForm.isbn"
+                    class="input"
+                    type="text"
+                    maxlength="20"
+                    placeholder="ISBN-10 or ISBN-13"
+                    required
+                    autofocus
+                    @blur="autofillSingleRecordFromIsbn()"
+                  />
+                </label>
+                <button
+                  type="button"
+                  class="btn-secondary"
+                  :disabled="singleRecordIsbnLookupLoading"
+                  @click="autofillSingleRecordFromIsbn(true)"
+                >
+                  {{ singleRecordIsbnLookupLoading ? "Looking up..." : "Autofill from ISBN" }}
+                </button>
+              </div>
+
+              <p
+                v-if="singleRecordLookupMessage"
+                class="text-sm"
+                :class="
+                  singleRecordLookupMessageTone === 'error'
+                    ? 'text-rose-600 dark:text-rose-300'
+                    : 'text-[#607EA6] dark:text-[#9BA7BF]'
+                "
+              >
+                {{ singleRecordLookupMessage }}
+              </p>
+
+              <div class="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                <label class="field-label">
+                  Volume *
+                  <input
+                    v-model.number="singleRecordForm.volume"
+                    class="input"
+                    type="number"
+                    min="1"
+                    max="99"
+                    step="1"
+                    required
+                  />
+                </label>
+                <label class="field-label">
+                  Month *
+                  <select v-model="singleRecordForm.month" class="input" required>
+                    <option disabled value="">-- select --</option>
+                    <option v-for="month in MONTH_OPTIONS" :key="month" :value="month">{{ month }}</option>
+                  </select>
+                </label>
+                <label class="field-label">
+                  Scheduled Year *
+                  <input
+                    v-model="singleRecordForm.year"
+                    class="input"
+                    type="number"
+                    min="2025"
+                    max="2100"
+                    step="1"
+                    required
+                  />
+                </label>
+                <label class="field-label md:col-span-2">
+                  Title *
+                  <input v-model="singleRecordForm.title" class="input" type="text" maxlength="200" required />
+                </label>
+                <label class="field-label md:col-span-2">
+                  Author *
+                  <input v-model="singleRecordForm.author" class="input" type="text" maxlength="160" required />
+                </label>
+                <label class="field-label md:col-span-2 xl:col-span-3">
+                  Thumbnail URL *
+                  <input
+                    v-model="singleRecordForm.thumbnailUrl"
+                    class="input"
+                    type="url"
+                    maxlength="500"
+                    placeholder="https://..."
+                    required
+                  />
+                </label>
+                <label class="field-label md:col-span-2 xl:col-span-3">
+                  Featured Image URL (optional)
+                  <input
+                    v-model="singleRecordForm.featuredImageUrl"
+                    class="input"
+                    type="url"
+                    maxlength="500"
+                    placeholder="https://..."
+                  />
+                </label>
+              </div>
+
+              <div class="flex flex-wrap items-center justify-between gap-3 border-t border-zinc-200 pt-4 dark:border-zinc-800">
+                <button type="button" class="btn-secondary" :disabled="singleRecordSubmitting" @click="resetSingleRecordForm">
+                  Reset
+                </button>
+                <button class="btn-primary" :disabled="singleRecordSubmitting">
+                  {{ singleRecordSubmitting ? "Adding..." : "Add Record" }}
+                </button>
+              </div>
+            </form>
+
+            <section class="card space-y-3">
+              <div class="flex items-center justify-between gap-2">
+                <h4 class="text-sm font-semibold uppercase tracking-wide text-zinc-700 dark:text-zinc-300">
+                  Session Records
+                </h4>
+                <button
+                  class="btn-secondary px-2 py-1 text-xs"
+                  :disabled="singleRecordSession.length === 0"
+                  @click="clearSingleRecordSession"
+                >
+                  Clear
+                </button>
+              </div>
+              <p v-if="singleRecordSession.length === 0" class="text-sm text-zinc-600 dark:text-zinc-400">
+                No records added this session.
+              </p>
+              <ul v-else class="space-y-2">
+                <li v-for="record in singleRecordSession" :key="record.id" class="comment-row">
+                  <div class="min-w-0">
+                    <p class="font-medium text-zinc-900 dark:text-zinc-100">{{ record.title }}</p>
+                    <p class="text-xs text-zinc-600 dark:text-zinc-400">
+                      Volume {{ record.volume }} • {{ record.month }} {{ record.year }} • {{ record.author }}
+                    </p>
+                  </div>
+                  <span class="text-xs text-zinc-500 dark:text-zinc-400">{{ record.isbn }}</span>
+                </li>
+              </ul>
+            </section>
+          </section>
+
+          <section v-else-if="adminTab === 'bulk'" class="space-y-5">
+            <section class="panel space-y-5">
+              <div class="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-200 pb-4 dark:border-zinc-800">
+                <p class="text-xs font-semibold uppercase tracking-[0.16em] text-zinc-600 dark:text-zinc-400">Bulk Import</p>
+                <label class="field-label max-w-[220px]">
+                  Mode
+                  <select v-model="uploadMode" class="input">
+                    <option value="append">Append</option>
+                    <option value="replace">Replace</option>
+                  </select>
+                </label>
+              </div>
+
+              <div class="field-label">
+                File (.csv or .json)
+                <label
+                  class="input flex cursor-pointer items-center gap-2 text-zinc-600 hover:border-[#B59A57] hover:text-zinc-800 dark:text-zinc-300 dark:hover:border-[#B59A57] dark:hover:text-zinc-100"
+                >
+                  <input
+                    class="sr-only"
+                    type="file"
+                    accept=".csv,.json"
+                    @change="setReadingListFile"
+                  />
+                  <svg
+                    class="h-4 w-4 shrink-0 text-[#607EA6] dark:text-[#9BA7BF]"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    aria-hidden="true"
+                  >
+                    <path d="M12 16V4"></path>
+                    <path d="m7 9 5-5 5 5"></path>
+                    <path d="M20 16.5v2a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18.5v-2"></path>
+                  </svg>
+                  <span class="truncate text-sm">
+                    {{ readingListFile ? readingListFile.name : "Upload CSV or JSON..." }}
+                  </span>
+                </label>
+              </div>
+
+              <div class="card space-y-3 text-sm leading-relaxed text-zinc-600 dark:text-zinc-400">
+                <p class="text-xs font-semibold uppercase tracking-wide text-zinc-700 dark:text-zinc-300">Column Reference</p>
+                <p>Required: `volume`, `title`, `author`, `month`.</p>
+                <p>Optional: `year` (scheduled read year), `isbn`, `meetingStartsAt`, `meetingLocation`, `thumbnailUrl`, `isFeatured`, `resources`.</p>
+                <p>Rules: `volume` integer 1-99, `year` 2025-2100, valid ISBN-10/13, valid URLs, valid meeting date/time.</p>
+              </div>
+
+              <div class="flex flex-wrap items-center justify-between gap-3 border-t border-zinc-200 pt-4 dark:border-zinc-800">
+                <div class="flex flex-wrap gap-3">
+                  <button
+                    class="btn-danger"
+                    :disabled="uploadingReadingList || clearingVolume || clearingUploadHistory || backfillingCovers"
+                    @click="clearVolumeBooks"
+                  >
+                    {{ clearingVolume ? "Clearing..." : "Clear Volume" }}
+                  </button>
+                  <button
+                    class="btn-secondary"
+                    :disabled="uploadingReadingList || clearingVolume || clearingUploadHistory || backfillingCovers"
+                    @click="backfillCoverImages"
+                  >
+                    {{ backfillingCovers ? "Backfilling..." : "Backfill Covers" }}
+                  </button>
+                </div>
+                <button
+                  class="btn-primary"
+                  :disabled="uploadingReadingList || clearingVolume || clearingUploadHistory || backfillingCovers"
+                  @click="uploadReadingList"
+                >
+                  {{ uploadingReadingList ? "Uploading..." : "Import" }}
+                </button>
+              </div>
+            </section>
+
+            <section class="panel space-y-4">
+              <div class="flex items-center justify-between gap-2">
+                <h4 class="text-sm font-semibold uppercase tracking-wide text-zinc-700 dark:text-zinc-300">
+                  Recent Uploads
+                </h4>
+                <button
+                  class="btn-secondary px-2 py-1 text-xs"
+                  :disabled="clearingUploadHistory || uploadHistory.length === 0"
+                  @click="clearUploadHistory"
+                >
+                  {{ clearingUploadHistory ? "Clearing..." : "Clear History" }}
+                </button>
+              </div>
+              <p v-if="uploadHistory.length === 0" class="text-sm text-zinc-600 dark:text-zinc-400">
+                No uploads yet.
+              </p>
+              <ul v-else class="space-y-3">
+                <li v-for="upload in uploadHistory" :key="upload.id" class="comment-row py-3">
+                  <span>{{ upload.filename }} ({{ formatUploadMode(upload.mode) }}, {{ upload.rowsImported }} {{ upload.mode === "clear" ? "deleted" : upload.mode === "backfill" ? "updated" : "rows" }})</span>
+                  <small class="text-xs text-zinc-500 dark:text-zinc-400">
+                    {{ formatDate(upload.createdAt) }}
+                  </small>
+                </li>
+              </ul>
+            </section>
+          </section>
+
+          <section v-else class="panel space-y-4">
             <h4 class="text-sm font-semibold uppercase tracking-wide text-zinc-700 dark:text-zinc-300">
               Pending Approvals
             </h4>
             <p v-if="pendingUsers.length === 0" class="text-sm text-zinc-600 dark:text-zinc-400">
               No pending users.
             </p>
-            <ul v-else class="space-y-2">
-              <li v-for="pendingUser in pendingUsers" :key="pendingUser.id" class="comment-row">
+            <ul v-else class="space-y-3">
+              <li v-for="pendingUser in pendingUsers" :key="pendingUser.id" class="comment-row py-3">
                 <div class="min-w-0">
                   <p class="font-medium text-zinc-900 dark:text-zinc-100">{{ pendingUser.name }}</p>
                   <p class="truncate text-xs text-zinc-600 dark:text-zinc-400">
@@ -2350,33 +2837,19 @@ function closeMemberProfile() {
                 </button>
               </li>
             </ul>
-          </div>
+          </section>
 
-          <div class="space-y-2">
-            <div class="flex items-center justify-between gap-2">
-              <h4 class="text-sm font-semibold uppercase tracking-wide text-zinc-700 dark:text-zinc-300">
-                Recent Uploads
-              </h4>
-              <button
-                class="btn-secondary px-2 py-1 text-xs"
-                :disabled="clearingUploadHistory || uploadHistory.length === 0"
-                @click="clearUploadHistory"
-              >
-                {{ clearingUploadHistory ? "Clearing..." : "Clear History" }}
-              </button>
-            </div>
-            <p v-if="uploadHistory.length === 0" class="text-sm text-zinc-600 dark:text-zinc-400">
-              No uploads yet.
-            </p>
-            <ul v-else class="space-y-2">
-              <li v-for="upload in uploadHistory" :key="upload.id" class="comment-row">
-                <span>{{ upload.filename }} ({{ formatUploadMode(upload.mode) }}, {{ upload.rowsImported }} {{ upload.mode === "clear" ? "deleted" : upload.mode === "backfill" ? "updated" : "rows" }})</span>
-                <small class="text-xs text-zinc-500 dark:text-zinc-400">
-                  {{ formatDate(upload.createdAt) }}
-                </small>
-              </li>
-            </ul>
-          </div>
+          <p
+            v-if="adminMessage"
+            class="text-sm"
+            :class="
+              adminMessageTone === 'error'
+                ? 'text-rose-600 dark:text-rose-300'
+                : 'text-[#607EA6] dark:text-[#9BA7BF]'
+            "
+          >
+            {{ adminMessage }}
+          </p>
         </section>
       </section>
     </div>

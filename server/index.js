@@ -263,6 +263,26 @@ const ratingSchema = z.object({
 });
 
 const readingListModeSchema = z.enum(["append", "replace"]);
+const singleRecordSchema = z.object({
+  mode: readingListModeSchema.optional().default("append"),
+  volume: z.coerce.number().int().min(1).max(99),
+  title: z.string().trim().min(1).max(200),
+  author: z.string().trim().min(1).max(160),
+  month: z.string().trim().min(1).max(30),
+  year: z.coerce.number().int().min(2025).max(2100),
+  isbn: z
+    .string()
+    .trim()
+    .transform((value) => normalizeIsbn(value))
+    .refine((value) => Boolean(value), {
+      message: "ISBN must be a valid ISBN-10 or ISBN-13."
+    }),
+  thumbnailUrl: z.string().trim().url().max(500),
+  featuredImageUrl: z.string().trim().url().max(500).optional()
+});
+const isbnLookupSchema = z.object({
+  isbn: z.string().trim().min(10).max(20)
+});
 const uploadVolumeSchema = z.preprocess(
   (value) => {
     if (value === undefined || value === null || value === "") return undefined;
@@ -307,7 +327,7 @@ const resourceLinkSchema = z.object({
 });
 const readingListRowSchema = z.object({
   volume: z.coerce.number().int().min(1).max(99),
-  year: z.coerce.number().int().min(1900).max(2100).optional(),
+  year: z.coerce.number().int().min(2025).max(2100).optional(),
   title: z.string().trim().min(1).max(200),
   author: z.string().trim().min(1).max(160),
   isbn: z.string().regex(/^(?:\d{9}[\dX]|\d{13})$/).optional(),
@@ -675,6 +695,25 @@ function getBooksPayload(userId) {
             AND lower(b2.author) = lower(books.author)
             AND b2.rating IS NOT NULL
         ) AS ratingsCount,
+        (
+          SELECT COUNT(*)
+          FROM books b2
+          INNER JOIN users u2 ON u2.id = b2.user_id
+          WHERE b2.volume = books.volume
+            AND lower(b2.title) = lower(books.title)
+            AND lower(b2.author) = lower(books.author)
+            AND u2.is_approved = 1
+        ) AS participantsCount,
+        (
+          SELECT COUNT(*)
+          FROM books b2
+          INNER JOIN users u2 ON u2.id = b2.user_id
+          WHERE b2.volume = books.volume
+            AND lower(b2.title) = lower(books.title)
+            AND lower(b2.author) = lower(books.author)
+            AND b2.is_completed = 1
+            AND u2.is_approved = 1
+        ) AS completedCount,
         created_at AS createdAt,
         CASE lower(month)
           WHEN 'january' THEN 1
@@ -744,6 +783,8 @@ function getBooksPayload(userId) {
         ? null
         : Number(book.averageRating),
     ratingsCount: Number(book.ratingsCount || 0),
+    participantsCount: Number(book.participantsCount || 0),
+    completedCount: Number(book.completedCount || 0),
     comments: commentsByBookId[book.id] || []
   }));
   const stripVolume = ({ volume, ...book }) => book;
@@ -1068,6 +1109,79 @@ async function lookupGoogleBooksCover(isbn) {
   }
 }
 
+function extractGoogleBooksImageUrl(imageLinks) {
+  if (!imageLinks) return undefined;
+  const candidate =
+    imageLinks.extraLarge ||
+    imageLinks.large ||
+    imageLinks.medium ||
+    imageLinks.thumbnail ||
+    imageLinks.smallThumbnail;
+  return toHttpsUrl(candidate);
+}
+
+function getPublishedYear(publishedDate) {
+  const match = String(publishedDate || "").match(/^(\d{4})/);
+  if (!match) return undefined;
+  const year = Number(match[1]);
+  if (!Number.isInteger(year) || year < 1900 || year > 2100) return undefined;
+  return year;
+}
+
+function getPublishedMonthName(publishedDate) {
+  const match = String(publishedDate || "").match(/^\d{4}-(\d{2})/);
+  if (!match) return undefined;
+  const monthIndex = Number(match[1]);
+  if (!Number.isInteger(monthIndex) || monthIndex < 1 || monthIndex > 12) return undefined;
+  return [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December"
+  ][monthIndex - 1];
+}
+
+async function lookupGoogleBooksByIsbn(isbn) {
+  const endpoint = `https://www.googleapis.com/books/v1/volumes?q=isbn:${encodeURIComponent(
+    isbn
+  )}&maxResults=1&printType=books`;
+  try {
+    const response = await fetch(endpoint, { signal: AbortSignal.timeout(COVER_LOOKUP_TIMEOUT_MS) });
+    if (!response.ok) return null;
+    const payload = await response.json();
+    const volume = payload?.items?.[0]?.volumeInfo;
+    if (!volume) return null;
+    const normalizedApiIsbn =
+      normalizeIsbn(
+        (volume.industryIdentifiers || []).find((entry) => String(entry?.type || "").toUpperCase() === "ISBN_13")
+          ?.identifier
+      ) ||
+      normalizeIsbn(
+        (volume.industryIdentifiers || []).find((entry) => String(entry?.type || "").toUpperCase() === "ISBN_10")
+          ?.identifier
+      ) ||
+      isbn;
+    return {
+      title: String(volume.title || "").trim() || undefined,
+      author: String(volume.authors?.[0] || "").trim() || undefined,
+      year: getPublishedYear(volume.publishedDate),
+      month: getPublishedMonthName(volume.publishedDate),
+      thumbnailUrl: extractGoogleBooksImageUrl(volume.imageLinks),
+      isbn: normalizedApiIsbn
+    };
+  } catch {
+    return null;
+  }
+}
+
 async function resolveCoverForIsbn(isbn) {
   if (!isbn || !COVER_ENRICHMENT_ENABLED) return null;
   const openLibraryCover = await lookupOpenLibraryCover(isbn);
@@ -1384,11 +1498,12 @@ function applyReadingListToAllUsers(rows, mode) {
         meeting_starts_at,
         meeting_location,
         thumbnail_url,
+        featured_image_url,
         resources_json,
         is_featured,
         created_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `
   );
   const updateBook = db.prepare(
@@ -1399,6 +1514,7 @@ function applyReadingListToAllUsers(rows, mode) {
         meeting_starts_at = COALESCE(?, meeting_starts_at),
         meeting_location = COALESCE(?, meeting_location),
         thumbnail_url = COALESCE(?, thumbnail_url),
+        featured_image_url = COALESCE(?, featured_image_url),
         resources_json = COALESCE(?, resources_json),
         isbn = COALESCE(?, isbn),
         is_featured = ?,
@@ -1431,6 +1547,7 @@ function applyReadingListToAllUsers(rows, mode) {
             row.meetingStartsAt || null,
             row.meetingLocation || null,
             row.thumbnailUrl || null,
+            row.featuredImageUrl || null,
             row.resources ? JSON.stringify(row.resources) : null,
             row.isbn || null,
             row.isFeatured ? 1 : 0,
@@ -1455,6 +1572,7 @@ function applyReadingListToAllUsers(rows, mode) {
           row.meetingStartsAt || null,
           row.meetingLocation || null,
           row.thumbnailUrl || null,
+          row.featuredImageUrl || null,
           JSON.stringify(row.resources || []),
           row.isFeatured ? 1 : 0,
           new Date().toISOString()
@@ -2293,6 +2411,76 @@ app.put(
     }
 
     return res.json({ summary });
+  }
+);
+
+app.post(
+  "/api/admin/reading-list/isbn-lookup",
+  requireAuth,
+  requireRole("admin"),
+  adminLimiter,
+  async (req, res) => {
+    const parsed = isbnLookupSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: "ISBN is required." });
+    }
+
+    const normalizedIsbn = normalizeIsbn(parsed.data.isbn);
+    if (!normalizedIsbn) {
+      return res.status(400).json({ error: "ISBN must be a valid ISBN-10 or ISBN-13." });
+    }
+
+    const book = await lookupGoogleBooksByIsbn(normalizedIsbn);
+    if (!book) {
+      return res.status(404).json({ error: "No matching book found for that ISBN." });
+    }
+
+    return res.json({ book });
+  }
+);
+
+app.post(
+  "/api/admin/reading-list/record",
+  requireAuth,
+  requireRole("admin"),
+  adminLimiter,
+  (req, res) => {
+    const parsed = singleRecordSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: parsed.error.issues[0]?.message || "Invalid record data." });
+    }
+
+    const row = {
+      volume: parsed.data.volume,
+      title: parsed.data.title,
+      author: parsed.data.author,
+      month: parsed.data.month,
+      year: parsed.data.year,
+      isbn: parsed.data.isbn,
+      thumbnailUrl: parsed.data.thumbnailUrl,
+      featuredImageUrl: parsed.data.featuredImageUrl,
+      meetingStartsAt: undefined,
+      meetingLocation: undefined,
+      resources: undefined,
+      isFeatured: false
+    };
+
+    const summary = applyReadingListToAllUsers([row], parsed.data.mode);
+    db.prepare(
+      `
+      INSERT INTO reading_list_uploads (id, admin_user_id, filename, mode, rows_imported, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `
+    ).run(
+      randomUUID(),
+      req.userId,
+      "single-record",
+      parsed.data.mode,
+      1,
+      new Date().toISOString()
+    );
+
+    return res.status(201).json({ summary });
   }
 );
 
