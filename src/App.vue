@@ -22,6 +22,7 @@ const DEMO_ACCOUNTS = DEV_QUICK_LOGIN_ENABLED
 const route = useRoute();
 const router = useRouter();
 const headerRef = ref(null);
+const volumeMenuRef = ref(null);
 const headerOffset = ref(0);
 
 const loading = ref(true);
@@ -30,8 +31,10 @@ const busyBookId = ref("");
 const completingBookId = ref("");
 const ratingBookId = ref("");
 const featuringBookId = ref("");
+const featureStarAnimatingBookId = ref("");
 const savingBookIsbn = ref(false);
 const savingBookCover = ref(false);
+const deletingBookRecord = ref(false);
 const uploadingBookFeaturedImage = ref(false);
 const uploadingReadingList = ref(false);
 const clearingVolume = ref(false);
@@ -64,8 +67,10 @@ const commentDrafts = ref({});
 const uploadHistory = ref([]);
 const pendingUsers = ref([]);
 const approvingUserId = ref("");
+const denyingUserId = ref("");
 const uploadMode = ref("append");
 const readingListFile = ref(null);
+const readingListDropActive = ref(false);
 const singleRecordSubmitting = ref(false);
 const singleRecordIsbnLookupLoading = ref(false);
 const lastSingleRecordLookupIsbn = ref("");
@@ -97,6 +102,7 @@ const loadingMemberProfile = ref(false);
 const savingProfile = ref(false);
 const uploadingProfileImage = ref(false);
 const profileImageFile = ref(null);
+const profileImageDropActive = ref(false);
 const profileMessage = ref("");
 const profileMessageTone = ref("success");
 const profileForm = ref({
@@ -118,6 +124,7 @@ const coverForm = ref({
 });
 const featuredImageMessage = ref("");
 const featuredImageMessageTone = ref("success");
+const featuredImageDropActive = ref(false);
 const meetingForm = ref({
   date: "",
   time: "",
@@ -299,6 +306,7 @@ onMounted(async () => {
   await nextTick();
   updateHeaderOffset();
   window.addEventListener("resize", updateHeaderOffset);
+  window.addEventListener("pointerdown", handleGlobalPointerDown, true);
   if (typeof ResizeObserver !== "undefined" && headerRef.value) {
     headerResizeObserver = new ResizeObserver(() => {
       updateHeaderOffset();
@@ -313,8 +321,16 @@ onUnmounted(() => {
     headerResizeObserver.disconnect();
     headerResizeObserver = undefined;
   }
+  window.removeEventListener("pointerdown", handleGlobalPointerDown, true);
   window.removeEventListener("resize", updateHeaderOffset);
 });
+
+function handleGlobalPointerDown(event) {
+  const target = event.target;
+  if (showVolumeMenu.value && volumeMenuRef.value && !volumeMenuRef.value.contains(target)) {
+    showVolumeMenu.value = false;
+  }
+}
 
 function loadTheme() {
   try {
@@ -652,6 +668,41 @@ async function clearBookCover() {
   await saveBookCover();
 }
 
+async function deleteSelectedBookRecord() {
+  if (!isAdmin.value || !selectedBook.value || deletingBookRecord.value) return;
+  const confirmation = window.confirm(
+    `Delete "${selectedBook.value.title}" by ${selectedBook.value.author} from Volume ${selectedBook.value.volume} for all members?\n\nThis will permanently remove associated comments, completion history, and ratings for this record.`
+  );
+  if (!confirmation) return;
+
+  deletingBookRecord.value = true;
+  resetAuthError();
+  try {
+    await api(`/admin/books/${encodeURIComponent(selectedBook.value.id)}`, {
+      method: "DELETE"
+    });
+    await loadBooks();
+    await loadDashboard();
+    router.push("/");
+  } catch (error) {
+    errorMessage.value = error.message;
+  } finally {
+    deletingBookRecord.value = false;
+  }
+}
+
+function extractFileFromEvent(event) {
+  if (event?.target?.files?.[0]) return event.target.files[0];
+  if (event?.dataTransfer?.files?.[0]) return event.dataTransfer.files[0];
+  return null;
+}
+
+function clearInputValue(event) {
+  if (event?.target && typeof event.target.value === "string") {
+    event.target.value = "";
+  }
+}
+
 async function uploadBookFeaturedImage(file) {
   if (!isAdmin.value || !selectedBook.value) return;
   if (!file) {
@@ -700,10 +751,27 @@ async function clearBookFeaturedImage() {
   }
 }
 
+function onHeaderFeaturedImageDragOver() {
+  if (!isAdmin.value || uploadingBookFeaturedImage.value) return;
+  featuredImageDropActive.value = true;
+}
+
+function onHeaderFeaturedImageDragLeave() {
+  featuredImageDropActive.value = false;
+}
+
+async function onHeaderFeaturedImageDrop(event) {
+  featuredImageDropActive.value = false;
+  if (!isAdmin.value || uploadingBookFeaturedImage.value) return;
+  const file = extractFileFromEvent(event);
+  if (!file) return;
+  await uploadBookFeaturedImage(file);
+}
+
 async function onHeaderFeaturedImageSelected(event) {
-  const input = event.target;
-  const file = input.files?.[0] || null;
-  input.value = "";
+  featuredImageDropActive.value = false;
+  const file = extractFileFromEvent(event);
+  clearInputValue(event);
   if (!file) return;
   await uploadBookFeaturedImage(file);
 }
@@ -804,7 +872,24 @@ async function saveProfile() {
 }
 
 function setProfileImageFile(event) {
-  profileImageFile.value = event.target.files?.[0] || null;
+  profileImageDropActive.value = false;
+  profileImageFile.value = extractFileFromEvent(event);
+  clearInputValue(event);
+}
+
+function onProfileImageDragOver() {
+  if (!isOwnProfile.value || uploadingProfileImage.value) return;
+  profileImageDropActive.value = true;
+}
+
+function onProfileImageDragLeave() {
+  profileImageDropActive.value = false;
+}
+
+function onProfileImageDrop(event) {
+  profileImageDropActive.value = false;
+  if (!isOwnProfile.value || uploadingProfileImage.value) return;
+  profileImageFile.value = extractFileFromEvent(event);
 }
 
 async function uploadProfileImage() {
@@ -1035,6 +1120,12 @@ async function clearBookRating(bookId) {
 
 async function setFeaturedBookForVolume(bookId) {
   if (!bookId) return;
+  featureStarAnimatingBookId.value = bookId;
+  window.setTimeout(() => {
+    if (featureStarAnimatingBookId.value === bookId) {
+      featureStarAnimatingBookId.value = "";
+    }
+  }, 280);
   featuringBookId.value = bookId;
   resetAuthError();
   try {
@@ -1056,7 +1147,24 @@ function formatUploadMode(value) {
 }
 
 function setReadingListFile(event) {
-  readingListFile.value = event.target.files?.[0] || null;
+  readingListDropActive.value = false;
+  readingListFile.value = extractFileFromEvent(event);
+  clearInputValue(event);
+}
+
+function onReadingListDragOver() {
+  if (!isAdmin.value || uploadingReadingList.value) return;
+  readingListDropActive.value = true;
+}
+
+function onReadingListDragLeave() {
+  readingListDropActive.value = false;
+}
+
+function onReadingListDrop(event) {
+  readingListDropActive.value = false;
+  if (!isAdmin.value || uploadingReadingList.value) return;
+  readingListFile.value = extractFileFromEvent(event);
 }
 
 function resetSingleRecordForm() {
@@ -1323,6 +1431,25 @@ async function approvePendingUser(pendingUser) {
   }
 }
 
+async function denyPendingUser(pendingUser) {
+  if (!pendingUser?.id) return;
+  denyingUserId.value = String(pendingUser.id);
+  adminMessage.value = "";
+  try {
+    await api(`/admin/users/${encodeURIComponent(String(pendingUser.id))}/deny`, {
+      method: "POST"
+    });
+    await loadPendingUsers();
+    adminMessageTone.value = "success";
+    adminMessage.value = `Denied ${pendingUser.email}.`;
+  } catch (error) {
+    adminMessageTone.value = "error";
+    adminMessage.value = error.message;
+  } finally {
+    denyingUserId.value = "";
+  }
+}
+
 function toggleVolumeMenu() {
   activeView.value = "volume";
   if (volumes.value.length === 0) {
@@ -1367,10 +1494,10 @@ function closeMemberProfile() {
 </script>
 
 <template>
-  <main class="min-h-screen bg-[#F2EFDF] text-[#23260F] dark:bg-[#23260F] dark:text-[#F2EFDF]">
+  <main class="min-h-screen bg-[#F2EFDF] text-[#23260F] dark:bg-[#141806] dark:text-[#F2EFDF]">
     <header
       ref="headerRef"
-      class="fixed inset-x-0 top-0 z-40 border-b border-[#9BA7BF]/50 bg-[#F2EFDF]/95 backdrop-blur dark:border-[#3B4013] dark:bg-[#23260F]/95"
+      class="fixed inset-x-0 top-0 z-40 border-b border-[#B59A57]/50 bg-[#F2EFDF]/95 backdrop-blur dark:border-[#3B4013] dark:bg-[#141806]/95"
     >
       <div class="mx-auto flex w-full max-w-screen-2xl flex-wrap items-center justify-between gap-3 px-4 py-4 sm:px-6 lg:px-8">
           <div class="flex min-w-0 flex-wrap items-center gap-3 sm:gap-6">
@@ -1379,22 +1506,25 @@ function closeMemberProfile() {
               class="text-left transition hover:opacity-90"
               @click="goHome"
             >
-              <h1 class="text-4xl font-bold tracking-tight">Stout Hearts</h1>
-              <p class="mt-1 text-zinc-600 dark:text-zinc-400">Book club tracker</p>
+              <h1 class="brand-title-shadow text-4xl font-bold tracking-tight">Stout Hearts</h1>
+              <p class="mt-1 text-zinc-600 dark:text-zinc-300">Book club tracker</p>
             </button>
             <nav v-if="user" class="flex flex-wrap items-center gap-2">
-              <div class="relative">
+              <div ref="volumeMenuRef" class="relative">
                 <button
-                  class="btn-tab"
+                  class="btn-tab icon-btn"
                   :class="{ 'btn-tab-active': activeView === 'volume' }"
                   @click="toggleVolumeMenu"
                 >
-                  Volume
+                  <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M6 9l6 6 6-6" />
+                  </svg>
+                  <span>Volume</span>
                   <span v-if="selectedVolumeLabel !== null"> {{ selectedVolumeLabel }}</span>
                 </button>
                 <div
                   v-if="showVolumeMenu"
-                  class="absolute left-0 z-20 mt-2 min-w-56 rounded-md border border-zinc-200 bg-white p-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-900"
+                  class="absolute left-0 z-20 mt-2 min-w-56 rounded-md border border-zinc-200 bg-white p-1 shadow-lg dark:border-[#3B4013] dark:bg-[#1A200B]"
                 >
                   <button
                     v-for="volumeGroup in volumes"
@@ -1403,16 +1533,16 @@ function closeMemberProfile() {
                     @click="openVolume(volumeGroup.volume)"
                   >
                     <span>Volume {{ volumeGroup.volume }}</span>
-                    <span class="text-xs text-zinc-500 dark:text-zinc-400">{{ volumeGroup.books.length }}</span>
+                    <span class="text-xs text-zinc-500 dark:text-zinc-300">{{ volumeGroup.books.length }}</span>
                   </button>
-                  <p v-if="volumes.length === 0" class="px-3 py-2 text-sm text-zinc-500 dark:text-zinc-400">
+                  <p v-if="volumes.length === 0" class="px-3 py-2 text-sm text-zinc-500 dark:text-zinc-300">
                     No volumes yet.
                   </p>
                 </div>
               </div>
               <button
                 v-if="isAdmin"
-                class="btn-tab inline-flex items-center"
+                class="btn-tab icon-btn"
                 :class="{ 'btn-tab-active': activeView === 'admin' }"
                 :aria-label="
                   pendingRequestCount > 0
@@ -1425,10 +1555,13 @@ function closeMemberProfile() {
                   router.push('/');
                 "
               >
-                Admin
+                <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M12 3l7 3v6c0 4.3-2.8 7.6-7 9-4.2-1.4-7-4.7-7-9V6l7-3Z" />
+                </svg>
+                <span>Admin</span>
                 <span
                   v-if="pendingRequestCount > 0"
-                  class="ml-2 inline-flex min-w-5 items-center justify-center rounded-full bg-rose-600 px-1.5 py-0.5 text-xs font-semibold leading-none text-white"
+                  class="ml-2 inline-flex min-w-5 items-center justify-center rounded-full bg-[#A62014] px-1.5 py-0.5 text-xs font-semibold leading-none text-white"
                 >
                   {{ pendingRequestCount > 99 ? "99+" : pendingRequestCount }}
                 </span>
@@ -1450,11 +1583,18 @@ function closeMemberProfile() {
                 />
                 <span v-else>{{ getInitials(user.name) }}</span>
               </span>
-              <span class="text-sm text-zinc-600 dark:text-zinc-400">
+              <span class="text-sm text-zinc-600 dark:text-zinc-300">
                 {{ user.name }} ({{ user.role }})
               </span>
             </button>
-            <button v-if="user" class="btn-secondary" @click="logout">Sign out</button>
+            <button v-if="user" class="btn-secondary icon-btn" @click="logout">
+              <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M15 17l5-5-5-5" />
+                <path stroke-linecap="round" stroke-linejoin="round" d="M20 12H9" />
+                <path stroke-linecap="round" stroke-linejoin="round" d="M12 20H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h7" />
+              </svg>
+              <span>Sign out</span>
+            </button>
             <button
               class="btn-secondary inline-flex h-10 w-10 items-center justify-center p-0"
               :aria-label="isDark ? 'Switch to light mode' : 'Switch to dark mode'"
@@ -1501,7 +1641,7 @@ function closeMemberProfile() {
           <h2 class="text-2xl font-semibold">
             {{ authMode === "login" ? "Sign in" : "Create account" }}
           </h2>
-          <p class="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
+          <p class="mt-1 text-sm text-zinc-600 dark:text-zinc-300">
             Secure auth with hashed passwords and HTTP-only session cookies. New accounts require admin approval.
           </p>
 
@@ -1531,14 +1671,28 @@ function closeMemberProfile() {
                 :autocomplete="authMode === 'register' ? 'new-password' : 'current-password'"
               />
             </label>
-            <p v-if="authMode === 'register'" class="text-xs text-zinc-500 dark:text-zinc-400">
+            <p v-if="authMode === 'register'" class="text-xs text-zinc-500 dark:text-zinc-300">
               Use at least 8 characters with letters and numbers.
             </p>
-            <p v-if="errorMessage" class="text-sm text-rose-600 dark:text-rose-300">
+            <p v-if="errorMessage" class="text-sm text-[#A62014] dark:text-[#A62014]">
               {{ errorMessage }}
             </p>
-            <button class="btn-primary w-full" :disabled="submittingAuth">
-              {{ submittingAuth ? "Please wait..." : authMode === "login" ? "Sign in" : "Create account" }}
+            <button class="btn-primary icon-btn w-full justify-center" :disabled="submittingAuth">
+              <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                <path
+                  v-if="authMode === 'login'"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  d="M15 17l5-5-5-5M20 12H9M12 20H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h7"
+                />
+                <path
+                  v-else
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  d="M12 5v14M5 12h14"
+                />
+              </svg>
+              <span>{{ submittingAuth ? "Please wait..." : authMode === "login" ? "Sign in" : "Create account" }}</span>
             </button>
           </form>
 
@@ -1555,7 +1709,7 @@ function closeMemberProfile() {
 
           <section
             v-if="DEMO_ACCOUNTS.length > 0"
-            class="mt-5 rounded-xl border border-dashed border-zinc-300 bg-zinc-50 p-3 dark:border-zinc-700 dark:bg-zinc-900/40"
+            class="mt-5 rounded-xl border border-dashed border-zinc-300 bg-zinc-50 p-3 dark:border-[#3B4013] dark:bg-[#1C230D]/75"
           >
             <p class="text-xs font-semibold uppercase tracking-wide text-zinc-600 dark:text-zinc-300">
               Dev Quick Login
@@ -1569,14 +1723,20 @@ function closeMemberProfile() {
                   </option>
                 </select>
               </label>
-              <button class="btn-secondary" type="button" @click="fillDemoCredentials">
-                Fill
+              <button class="btn-secondary icon-btn" type="button" @click="fillDemoCredentials">
+                <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M12 3v18M3 12h18" />
+                </svg>
+                <span>Fill</span>
               </button>
-              <button class="btn-primary" type="button" :disabled="submittingAuth" @click="signInDemoAccount">
-                {{ submittingAuth ? "Signing in..." : "Sign in demo" }}
+              <button class="btn-primary icon-btn" type="button" :disabled="submittingAuth" @click="signInDemoAccount">
+                <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M15 17l5-5-5-5M20 12H9M12 20H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h7" />
+                </svg>
+                <span>{{ submittingAuth ? "Signing in..." : "Sign in demo" }}</span>
               </button>
             </div>
-            <p class="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
+            <p class="mt-2 text-xs text-zinc-500 dark:text-zinc-300">
               Development only.
             </p>
           </section>
@@ -1584,27 +1744,39 @@ function closeMemberProfile() {
       </section>
 
       <section v-else class="space-y-4">
-        <p v-if="errorMessage" class="text-sm text-rose-600 dark:text-rose-300">
+        <p v-if="errorMessage" class="text-sm text-[#A62014] dark:text-[#A62014]">
           {{ errorMessage }}
         </p>
 
         <section v-if="activeView === 'volume' && viewingBookDetails" class="space-y-4">
           <section v-if="selectedBook" class="panel space-y-4">
             <div class="flex items-center justify-between gap-3">
-              <button class="btn-secondary" @click="closeBookDetails">Back to Volume</button>
+              <button class="btn-secondary icon-btn" @click="closeBookDetails">
+                <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M15 18l-6-6 6-6" />
+                </svg>
+                <span>Back to Volume</span>
+              </button>
               <div class="flex items-center gap-3">
-                <p class="text-sm text-zinc-600 dark:text-zinc-400">Volume {{ selectedBook.volume }}</p>
+                <p class="text-sm text-zinc-600 dark:text-zinc-300">Volume {{ selectedBook.volume }}</p>
                 <p
                   v-if="selectedBook.isFeatured"
-                  class="text-xs font-semibold uppercase tracking-wide text-[#607EA6] dark:text-[#9BA7BF]"
+                  class="text-xs font-semibold uppercase tracking-wide text-[#B59A57] dark:text-[#B59A57]"
                 >
                   Featured for Volume
                 </p>
               </div>
             </div>
 
-            <section class="overflow-visible rounded-xl bg-zinc-50/50 dark:bg-zinc-900/20">
-              <div class="relative h-44 overflow-hidden rounded-t-xl sm:h-56">
+            <section class="overflow-visible rounded-xl bg-zinc-50/50 dark:bg-[#1C230D]/75">
+              <div
+                class="relative h-44 overflow-hidden rounded-t-xl transition sm:h-56"
+                :class="isAdmin && featuredImageDropActive ? 'ring-2 ring-inset ring-[#B59A57]' : ''"
+                @dragenter.prevent="onHeaderFeaturedImageDragOver"
+                @dragover.prevent="onHeaderFeaturedImageDragOver"
+                @dragleave.prevent="onHeaderFeaturedImageDragLeave"
+                @drop.prevent="onHeaderFeaturedImageDrop"
+              >
                 <img
                   v-if="selectedBook.featuredImageUrl"
                   :src="selectedBook.featuredImageUrl"
@@ -1617,11 +1789,17 @@ function closeMemberProfile() {
                 />
                 <div
                   v-else
-                  class="absolute inset-0 flex items-center justify-center bg-zinc-100 text-xs font-medium text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400"
+                  class="absolute inset-0 flex items-center justify-center bg-zinc-100 text-xs font-medium text-zinc-500 dark:bg-[#1F2710] dark:text-zinc-300"
                 >
                   No featured header image uploaded yet.
                 </div>
                 <div class="absolute inset-0 bg-gradient-to-b from-zinc-950/25 via-zinc-950/5 to-transparent"></div>
+                <div
+                  v-if="isAdmin && featuredImageDropActive"
+                  class="absolute inset-0 z-10 flex items-center justify-center bg-black/35 text-xs font-semibold uppercase tracking-wide text-white"
+                >
+                  Drop image to upload
+                </div>
                 <label
                   v-if="isAdmin"
                   class="absolute right-3 top-3 z-20 flex h-9 w-9 cursor-pointer items-center justify-center rounded-full border border-white/60 bg-black/45 text-white shadow transition hover:bg-black/65"
@@ -1662,10 +1840,11 @@ function closeMemberProfile() {
                     class="absolute right-2 top-2 z-20 flex h-8 w-8 items-center justify-center rounded-full border border-white/70 bg-black/55 text-white shadow transition hover:bg-black/70"
                     :class="
                       selectedBook.isFeatured
-                        ? 'border-amber-300/80 bg-black/70 text-amber-300 hover:bg-black/70'
-                        : ''
+                        ? 'border-[#B59A57]/90 bg-black/75 text-[#B59A57] hover:bg-black/75'
+                        : 'text-[#F2EFDF]'
                     "
-                    :disabled="selectedBook.isFeatured || featuringBookId === selectedBook.id"
+                    :disabled="featuringBookId === selectedBook.id"
+                    :aria-disabled="selectedBook.isFeatured || featuringBookId === selectedBook.id ? 'true' : 'false'"
                     :title="
                       selectedBook.isFeatured
                         ? 'Already the featured book for this volume'
@@ -1680,10 +1859,12 @@ function closeMemberProfile() {
                           ? 'Setting featured book'
                           : 'Set this as the featured book for this volume'
                     "
-                    @click="setFeaturedBookForVolume(selectedBook.id)"
+                    :data-feature-star-animate="featureStarAnimatingBookId === selectedBook.id ? 'true' : 'false'"
+                    @click="!selectedBook.isFeatured && setFeaturedBookForVolume(selectedBook.id)"
                   >
                     <svg
                       class="h-4 w-4"
+                      :class="selectedBook.isFeatured ? 'text-[#B59A57]' : ''"
                       viewBox="0 0 24 24"
                       fill="currentColor"
                       aria-hidden="true"
@@ -1701,17 +1882,17 @@ function closeMemberProfile() {
                   />
                   <div
                     v-else
-                    class="flex h-full w-full items-center justify-center text-center text-xs text-zinc-500 dark:text-zinc-400"
+                    class="flex h-full w-full items-center justify-center text-center text-xs text-zinc-500 dark:text-zinc-300"
                   >
                     No cover image
                   </div>
                 </div>
                 <h2 class="text-3xl font-semibold sm:text-4xl">{{ selectedBook.title }}</h2>
                 <p class="mt-1 text-zinc-700 dark:text-zinc-300">by {{ selectedBook.author }}</p>
-                <p class="mt-2 text-sm text-zinc-600 dark:text-zinc-400">
+                <p class="mt-2 text-sm text-zinc-600 dark:text-zinc-300">
                   {{ selectedBook.month }} {{ selectedBook.year }}
                 </p>
-                <p class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+                <p class="mt-1 text-xs text-zinc-500 dark:text-zinc-300">
                   ISBN: {{ selectedBook.isbn || "Not set" }}
                 </p>
               </div>
@@ -1721,8 +1902,8 @@ function closeMemberProfile() {
               class="text-sm"
               :class="
                 featuredImageMessageTone === 'error'
-                  ? 'text-rose-600 dark:text-rose-300'
-                  : 'text-[#607EA6] dark:text-[#9BA7BF]'
+                  ? 'text-[#A62014] dark:text-[#A62014]'
+                  : 'text-[#B59A57] dark:text-[#B59A57]'
               "
             >
               {{ featuredImageMessage }}
@@ -1732,17 +1913,17 @@ function closeMemberProfile() {
               <article class="card space-y-3">
                 <div class="flex flex-wrap items-center justify-between gap-2">
                   <h3 class="text-xl font-semibold">Reading Status</h3>
-                  <span class="rounded-full bg-[#F2EFDF] px-3 py-1 text-xs font-semibold text-[#3B4013] dark:bg-[#23260F]/60 dark:text-[#F2EFDF]">
+                  <span class="rounded-full bg-[#F2EFDF] px-3 py-1 text-xs font-semibold text-[#3B4013] dark:bg-[#1A200B]/75 dark:text-[#F2EFDF]">
                     {{ selectedBookCompletionStats.completed }} / {{ selectedBookCompletionStats.participants }} completed
                   </span>
                 </div>
                 <div class="h-2 w-full overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700">
                   <div
-                    class="h-full rounded-full bg-[#607EA6] transition-[width] duration-500 dark:bg-[#9BA7BF]"
+                    class="h-full rounded-full bg-[#B59A57] transition-[width] duration-500 dark:bg-[#B59A57]"
                     :style="{ width: `${selectedBookCompletionStats.percent}%` }"
                   ></div>
                 </div>
-                <p class="text-sm text-zinc-600 dark:text-zinc-400">
+                <p class="text-sm text-zinc-600 dark:text-zinc-300">
                   {{
                     selectedBookCompletionStats.participants > 0
                       ? `${selectedBookCompletionStats.remaining} member${selectedBookCompletionStats.remaining === 1 ? "" : "s"} still reading.`
@@ -1751,25 +1932,39 @@ function closeMemberProfile() {
                 </p>
 
                 <div class="flex flex-wrap items-center gap-2">
-                  <p v-if="selectedBook.isCompleted" class="text-sm text-[#607EA6] dark:text-[#9BA7BF]">
+                  <p v-if="selectedBook.isCompleted" class="text-sm text-[#B59A57] dark:text-[#B59A57]">
                     Completed
                     <span v-if="selectedBook.completedAt">
                       on {{ formatDate(selectedBook.completedAt) }} at {{ formatCommentTime(selectedBook.completedAt) }}
                     </span>
                   </p>
-                  <p v-else class="text-sm text-zinc-600 dark:text-zinc-400">Not completed yet.</p>
+                  <p v-else class="text-sm text-zinc-600 dark:text-zinc-300">Not completed yet.</p>
                   <button
-                    class="btn-secondary"
+                    class="btn-secondary icon-btn"
                     :disabled="completingBookId === selectedBook.id"
                     @click="setBookCompletion(selectedBook.id, !selectedBook.isCompleted)"
                   >
-                    {{
+                    <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                      <path
+                        v-if="selectedBook.isCompleted"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        d="M6 12h12M12 6v12"
+                      />
+                      <path
+                        v-else
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        d="m20 6-11 11-5-5"
+                      />
+                    </svg>
+                    <span>{{
                       completingBookId === selectedBook.id
                         ? "Saving..."
                         : selectedBook.isCompleted
                           ? "Mark as Not Completed"
                           : "Mark as Completed"
-                    }}
+                    }}</span>
                   </button>
                 </div>
 
@@ -1783,13 +1978,13 @@ function closeMemberProfile() {
                         :class="
                           selectedBook.ratingsCount > 0 && star <= Math.round(selectedBook.averageRating || 0)
                             ? 'text-amber-500'
-                            : 'text-zinc-300 dark:text-zinc-600'
+                            : 'text-zinc-300 dark:text-zinc-400'
                         "
                       >
                         ★
                       </span>
                     </div>
-                    <p class="text-sm text-zinc-600 dark:text-zinc-400">
+                    <p class="text-sm text-zinc-600 dark:text-zinc-300">
                       <span v-if="selectedBook.ratingsCount > 0" class="font-semibold text-zinc-900 dark:text-zinc-100">
                         {{ selectedBook.averageRating.toFixed(1) }}/5
                       </span>
@@ -1802,7 +1997,7 @@ function closeMemberProfile() {
                       </span>
                     </p>
                   </div>
-                  <p v-if="selectedBook.ratingsCount === 0" class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+                  <p v-if="selectedBook.ratingsCount === 0" class="mt-1 text-xs text-zinc-500 dark:text-zinc-300">
                     Be the first to rate after marking this book completed.
                   </p>
 
@@ -1817,7 +2012,7 @@ function closeMemberProfile() {
                         :class="
                           (selectedBook.userRating || 0) >= star
                             ? 'text-amber-500 hover:text-amber-400'
-                            : 'text-zinc-400 hover:text-zinc-500 dark:text-zinc-500 dark:hover:text-zinc-300'
+                            : 'text-zinc-400 hover:text-zinc-500 dark:text-zinc-300 dark:hover:text-zinc-300'
                         "
                         :disabled="ratingBookId === selectedBook.id"
                         @click="setBookRating(selectedBook.id, star)"
@@ -1828,11 +2023,14 @@ function closeMemberProfile() {
                     <button
                       v-if="selectedBook.userRating"
                       type="button"
-                      class="btn-secondary px-2 py-1 text-xs"
+                      class="btn-secondary icon-btn px-2 py-1 text-xs"
                       :disabled="ratingBookId === selectedBook.id"
                       @click="clearBookRating(selectedBook.id)"
                     >
-                      {{ ratingBookId === selectedBook.id ? "Saving..." : "Clear Rating" }}
+                      <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M18 6 6 18M6 6l12 12" />
+                      </svg>
+                      <span>{{ ratingBookId === selectedBook.id ? "Saving..." : "Clear Rating" }}</span>
                     </button>
                   </div>
                 </div>
@@ -1841,7 +2039,7 @@ function closeMemberProfile() {
               <article class="card space-y-3">
                 <div class="flex items-center gap-2">
                   <svg
-                    class="h-4 w-4 text-[#607EA6] dark:text-[#9BA7BF]"
+                    class="h-4 w-4 text-[#B59A57] dark:text-[#B59A57]"
                     viewBox="0 0 24 24"
                     fill="none"
                     stroke="currentColor"
@@ -1866,25 +2064,34 @@ function closeMemberProfile() {
                   </p>
                   <div class="flex flex-wrap items-center gap-2 pt-1">
                     <a
-                      class="btn-secondary px-3 py-1 text-xs"
+                      class="btn-secondary icon-btn px-3 py-1 text-xs"
                       :href="selectedBookMeetingActions.calendarUrl"
                       target="_blank"
                       rel="noopener noreferrer"
                     >
-                      Add to Calendar
+                      <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                        <rect x="3" y="4" width="18" height="18" rx="2"></rect>
+                        <path d="M16 2v4M8 2v4M3 10h18"></path>
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 13v5M9.5 15.5H14.5"></path>
+                      </svg>
+                      <span>Add to Calendar</span>
                     </a>
                     <a
                       v-if="selectedBookMeetingActions.mapUrl"
-                      class="btn-secondary px-3 py-1 text-xs"
+                      class="btn-secondary icon-btn px-3 py-1 text-xs"
                       :href="selectedBookMeetingActions.mapUrl"
                       target="_blank"
                       rel="noopener noreferrer"
                     >
-                      Open Map
+                      <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 21s7-5.5 7-11a7 7 0 1 0-14 0c0 5.5 7 11 7 11Z"></path>
+                        <circle cx="12" cy="10" r="2.5"></circle>
+                      </svg>
+                      <span>Open Map</span>
                     </a>
                   </div>
                 </div>
-                <p v-else class="text-sm text-zinc-600 dark:text-zinc-400">
+                <p v-else class="text-sm text-zinc-600 dark:text-zinc-300">
                   No meeting set for this book yet.
                 </p>
               </article>
@@ -1895,14 +2102,28 @@ function closeMemberProfile() {
                 <h3 class="text-lg font-semibold">Admin Settings</h3>
                 <button
                   type="button"
-                  class="btn-secondary px-3 py-1 text-xs"
+                  class="btn-secondary icon-btn px-3 py-1 text-xs"
                   :aria-expanded="adminSettingsExpanded ? 'true' : 'false'"
                   @click="adminSettingsExpanded = !adminSettingsExpanded"
                 >
-                  {{ adminSettingsExpanded ? "Collapse" : "Expand" }}
+                  <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                    <path
+                      v-if="adminSettingsExpanded"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      d="m18 15-6-6-6 6"
+                    />
+                    <path
+                      v-else
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      d="m6 9 6 6 6-6"
+                    />
+                  </svg>
+                  <span>{{ adminSettingsExpanded ? "Collapse" : "Expand" }}</span>
                 </button>
               </div>
-              <p class="text-xs text-zinc-500 dark:text-zinc-400">
+              <p class="text-xs text-zinc-500 dark:text-zinc-300">
                 Changes here apply to this logical book across all member records for this volume.
               </p>
 
@@ -1925,8 +2146,8 @@ function closeMemberProfile() {
                   class="text-sm"
                   :class="
                     isbnMessageTone === 'error'
-                      ? 'text-rose-600 dark:text-rose-300'
-                      : 'text-[#607EA6] dark:text-[#9BA7BF]'
+                      ? 'text-[#A62014] dark:text-[#A62014]'
+                      : 'text-[#B59A57] dark:text-[#B59A57]'
                   "
                 >
                   {{ isbnMessage }}
@@ -1971,8 +2192,8 @@ function closeMemberProfile() {
                   class="text-sm"
                   :class="
                     coverMessageTone === 'error'
-                      ? 'text-rose-600 dark:text-rose-300'
-                      : 'text-[#607EA6] dark:text-[#9BA7BF]'
+                      ? 'text-[#A62014] dark:text-[#A62014]'
+                      : 'text-[#B59A57] dark:text-[#B59A57]'
                   "
                 >
                   {{ coverMessage }}
@@ -2002,7 +2223,7 @@ function closeMemberProfile() {
 
               <div class="card space-y-2">
                 <p class="text-sm font-semibold">Featured Header Image</p>
-                <p class="text-xs text-zinc-600 dark:text-zinc-400">
+                <p class="text-xs text-zinc-600 dark:text-zinc-300">
                   Use the upload icon in the top-right corner of the header image to replace it.
                 </p>
                 <button
@@ -2049,8 +2270,8 @@ function closeMemberProfile() {
                   class="text-sm"
                   :class="
                     meetingMessageTone === 'error'
-                      ? 'text-rose-600 dark:text-rose-300'
-                      : 'text-[#607EA6] dark:text-[#9BA7BF]'
+                      ? 'text-[#A62014] dark:text-[#A62014]'
+                      : 'text-[#B59A57] dark:text-[#B59A57]'
                   "
                 >
                   {{ meetingMessage }}
@@ -2077,19 +2298,37 @@ function closeMemberProfile() {
                   </button>
                 </div>
               </form>
+
+              <div class="card space-y-2 lg:col-span-2">
+                <p class="text-sm font-semibold">Delete Record</p>
+                <p class="text-xs text-zinc-600 dark:text-zinc-300">
+                  Permanently removes this book record for all members in this volume, including related comments, completion, and ratings.
+                </p>
+                <button
+                  type="button"
+                  class="btn-danger icon-btn w-fit"
+                  :disabled="deletingBookRecord"
+                  @click="deleteSelectedBookRecord"
+                >
+                  <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M4 7h16M9 7V5h6v2M8 7l1 12h6l1-12"></path>
+                  </svg>
+                  <span>{{ deletingBookRecord ? "Deleting..." : "Delete Record" }}</span>
+                </button>
+              </div>
               </div>
             </section>
 
             <div class="space-y-2">
               <h3 class="text-lg font-semibold">Resources</h3>
-              <p v-if="selectedBook.resources.length === 0" class="text-sm text-zinc-600 dark:text-zinc-400">
+              <p v-if="selectedBook.resources.length === 0" class="text-sm text-zinc-600 dark:text-zinc-300">
                 No resource links yet.
               </p>
               <ul v-else class="space-y-2">
                 <li v-for="resource in selectedBook.resources" :key="`${resource.label}-${resource.url}`" class="comment-row">
                   <span>{{ resource.label }}</span>
                   <a
-                    class="text-sm font-medium text-[#607EA6] underline dark:text-[#9BA7BF]"
+                    class="text-sm font-medium text-[#B59A57] underline dark:text-[#B59A57]"
                     :href="resource.url"
                     target="_blank"
                     rel="noopener noreferrer"
@@ -2102,14 +2341,14 @@ function closeMemberProfile() {
 
             <div class="space-y-2">
               <h3 class="text-lg font-semibold">Comments</h3>
-              <p v-if="selectedBook.comments.length === 0" class="text-sm text-zinc-600 dark:text-zinc-400">
+              <p v-if="selectedBook.comments.length === 0" class="text-sm text-zinc-600 dark:text-zinc-300">
                 No comments yet.
               </p>
               <ul v-else class="space-y-2">
                 <li v-for="comment in selectedBook.comments" :key="comment.id" class="comment-row">
                   <div class="min-w-0">
                     <p>{{ comment.text }}</p>
-                    <small class="text-xs text-zinc-500 dark:text-zinc-400">
+                    <small class="text-xs text-zinc-500 dark:text-zinc-300">
                       by {{ comment.authorName || "Unknown" }} on {{ formatDate(comment.createdAt) }} at {{ formatCommentTime(comment.createdAt) }}
                     </small>
                   </div>
@@ -2123,11 +2362,14 @@ function closeMemberProfile() {
                   @keyup.enter="addComment(selectedBook.id)"
                 />
                 <button
-                  class="btn-primary"
+                  class="btn-primary icon-btn"
                   :disabled="busyBookId === selectedBook.id"
                   @click="addComment(selectedBook.id)"
                 >
-                  Add
+                  <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 5v14M5 12h14" />
+                  </svg>
+                  <span>Add</span>
                 </button>
               </div>
             </div>
@@ -2135,10 +2377,15 @@ function closeMemberProfile() {
 
           <section v-else class="panel space-y-3">
             <h2 class="text-2xl font-semibold">Book not found</h2>
-            <p class="text-sm text-zinc-600 dark:text-zinc-400">
+            <p class="text-sm text-zinc-600 dark:text-zinc-300">
               This book may have been removed or is not available in your current data.
             </p>
-            <button class="btn-secondary" @click="closeBookDetails">Back to Volume</button>
+            <button class="btn-secondary icon-btn" @click="closeBookDetails">
+              <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M15 18l-6-6 6-6" />
+              </svg>
+              <span>Back to Volume</span>
+            </button>
           </section>
         </section>
 
@@ -2149,8 +2396,13 @@ function closeMemberProfile() {
 
           <section v-else-if="memberProfile" class="panel space-y-4">
             <div class="flex items-center justify-between gap-3">
-              <button class="btn-secondary" @click="closeMemberProfile">Back to Volume</button>
-              <p class="text-sm text-zinc-600 dark:text-zinc-400">{{ memberProfile.role }}</p>
+              <button class="btn-secondary icon-btn" @click="closeMemberProfile">
+                <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M15 18l-6-6 6-6" />
+                </svg>
+                <span>Back to Volume</span>
+              </button>
+              <p class="text-sm text-zinc-600 dark:text-zinc-300">{{ memberProfile.role }}</p>
             </div>
 
             <div class="flex flex-wrap items-center gap-4">
@@ -2167,7 +2419,7 @@ function closeMemberProfile() {
               </div>
               <div>
                 <h2 class="text-3xl font-semibold">{{ memberProfile.name }}</h2>
-                <p class="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
+                <p class="mt-1 text-sm text-zinc-600 dark:text-zinc-300">
                   Joined {{ formatDate(memberProfile.createdAt) }}
                 </p>
               </div>
@@ -2176,15 +2428,15 @@ function closeMemberProfile() {
             <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
               <article class="card">
                 <p class="text-2xl font-semibold">{{ memberProfile.booksRead }}</p>
-                <p class="text-sm text-zinc-600 dark:text-zinc-400">Books Completed</p>
+                <p class="text-sm text-zinc-600 dark:text-zinc-300">Books Completed</p>
               </article>
               <article class="card">
                 <p class="text-2xl font-semibold">{{ memberProfile.commentsCount }}</p>
-                <p class="text-sm text-zinc-600 dark:text-zinc-400">Comments Posted</p>
+                <p class="text-sm text-zinc-600 dark:text-zinc-300">Comments Posted</p>
               </article>
               <article class="card">
                 <p class="text-2xl font-semibold">{{ memberProfile.role }}</p>
-                <p class="text-sm text-zinc-600 dark:text-zinc-400">Role</p>
+                <p class="text-sm text-zinc-600 dark:text-zinc-300">Role</p>
               </article>
             </div>
 
@@ -2194,16 +2446,52 @@ function closeMemberProfile() {
                 Name
                 <input v-model="profileForm.name" class="input" type="text" required maxlength="80" />
               </label>
-              <label class="field-label">
-                Profile Image
-                <input
-                  class="input"
-                  type="file"
-                  accept="image/png,image/jpeg,image/webp,image/gif"
-                  @change="setProfileImageFile"
-                />
-              </label>
-              <p class="text-xs text-zinc-500 dark:text-zinc-400">
+              <div class="field-label space-y-2">
+                <span>Profile Image</span>
+                <label
+                  class="input flex min-h-20 cursor-pointer items-center gap-2 text-zinc-600 hover:border-[#B59A57] hover:text-zinc-800 dark:text-zinc-300 dark:hover:border-[#B59A57] dark:hover:text-zinc-100"
+                  :class="
+                    profileImageDropActive
+                      ? 'border-[#B59A57] bg-[#B59A57]/10 text-zinc-900 dark:bg-[#3B4013]/50 dark:text-zinc-100'
+                      : ''
+                  "
+                  @dragenter.prevent="onProfileImageDragOver"
+                  @dragover.prevent="onProfileImageDragOver"
+                  @dragleave.prevent="onProfileImageDragLeave"
+                  @drop.prevent="onProfileImageDrop"
+                >
+                  <input
+                    class="sr-only"
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp,image/gif"
+                    @change="setProfileImageFile"
+                  />
+                  <svg
+                    class="h-4 w-4 shrink-0 text-[#B59A57] dark:text-[#B59A57]"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    aria-hidden="true"
+                  >
+                    <path d="M12 16V4"></path>
+                    <path d="m7 9 5-5 5 5"></path>
+                    <path d="M20 16.5v2A1.5 1.5 0 0 1 18.5 20h-13A1.5 1.5 0 0 1 4 18.5v-2"></path>
+                  </svg>
+                  <span class="truncate text-sm">
+                    {{
+                      profileImageFile
+                        ? profileImageFile.name
+                        : profileImageDropActive
+                          ? "Drop image here"
+                          : "Drop image here or click to browse"
+                    }}
+                  </span>
+                </label>
+              </div>
+              <p class="text-xs text-zinc-500 dark:text-zinc-300">
                 Upload JPG, PNG, WEBP, or GIF up to 2MB.
               </p>
               <p
@@ -2211,37 +2499,48 @@ function closeMemberProfile() {
                 class="text-sm"
                 :class="
                   profileMessageTone === 'error'
-                    ? 'text-rose-600 dark:text-rose-300'
-                    : 'text-[#607EA6] dark:text-[#9BA7BF]'
+                    ? 'text-[#A62014] dark:text-[#A62014]'
+                    : 'text-[#B59A57] dark:text-[#B59A57]'
                 "
               >
                 {{ profileMessage }}
               </p>
               <div class="flex flex-wrap gap-2">
-                <button class="btn-primary" :disabled="savingProfile || uploadingProfileImage">
-                  {{ savingProfile ? "Saving..." : "Save Profile" }}
+                <button class="btn-primary icon-btn" :disabled="savingProfile || uploadingProfileImage">
+                  <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="m20 6-11 11-5-5" />
+                  </svg>
+                  <span>{{ savingProfile ? "Saving..." : "Save Profile" }}</span>
                 </button>
                 <button
                   type="button"
-                  class="btn-secondary"
+                  class="btn-secondary icon-btn"
                   :disabled="uploadingProfileImage || !profileImageFile"
                   @click="uploadProfileImage"
                 >
-                  {{ uploadingProfileImage ? "Uploading..." : "Upload Image" }}
+                  <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 16V4"></path>
+                    <path stroke-linecap="round" stroke-linejoin="round" d="m7 9 5-5 5 5"></path>
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M20 16.5v2A1.5 1.5 0 0 1 18.5 20h-13A1.5 1.5 0 0 1 4 18.5v-2"></path>
+                  </svg>
+                  <span>{{ uploadingProfileImage ? "Uploading..." : "Upload Image" }}</span>
                 </button>
                 <button
                   type="button"
-                  class="btn-danger"
+                  class="btn-danger icon-btn"
                   :disabled="uploadingProfileImage || !memberProfile.profileImageUrl"
                   @click="clearProfileImage"
                 >
-                  {{ uploadingProfileImage ? "Working..." : "Remove Image" }}
+                  <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M18 6 6 18M6 6l12 12" />
+                  </svg>
+                  <span>{{ uploadingProfileImage ? "Working..." : "Remove Image" }}</span>
                 </button>
               </div>
             </form>
 
             <section v-else class="card">
-              <p class="text-sm text-zinc-600 dark:text-zinc-400">
+              <p class="text-sm text-zinc-600 dark:text-zinc-300">
                 Only this member can edit their profile image.
               </p>
             </section>
@@ -2250,7 +2549,7 @@ function closeMemberProfile() {
               <h3 class="text-lg font-semibold">Recent Comments</h3>
               <p
                 v-if="memberRecentComments.length === 0"
-                class="text-sm text-zinc-600 dark:text-zinc-400"
+                class="text-sm text-zinc-600 dark:text-zinc-300"
               >
                 No comments yet.
               </p>
@@ -2262,16 +2561,19 @@ function closeMemberProfile() {
                 >
                   <div class="min-w-0">
                     <p>{{ comment.text }}</p>
-                    <p class="text-xs text-zinc-500 dark:text-zinc-400">
+                    <p class="text-xs text-zinc-500 dark:text-zinc-300">
                       {{ formatDate(comment.createdAt) }} at {{ formatCommentTime(comment.createdAt) }}
                     </p>
                   </div>
                   <button
-                    class="btn-secondary shrink-0 px-2 py-1 text-xs"
+                    class="btn-secondary icon-btn shrink-0 px-2 py-1 text-xs"
                     :disabled="!comment.viewerBookId"
                     @click="openBookDetails(comment.viewerBookId)"
                   >
-                    {{ comment.viewerBookId ? comment.bookTitle : "Book unavailable" }}
+                    <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M9 18l6-6-6-6" />
+                    </svg>
+                    <span>{{ comment.viewerBookId ? comment.bookTitle : "Book unavailable" }}</span>
                   </button>
                 </li>
               </ul>
@@ -2280,17 +2582,22 @@ function closeMemberProfile() {
 
           <section v-else class="panel space-y-3">
             <h2 class="text-2xl font-semibold">Member not found</h2>
-            <p class="text-sm text-zinc-600 dark:text-zinc-400">
+            <p class="text-sm text-zinc-600 dark:text-zinc-300">
               This profile may not exist or may be unavailable.
             </p>
-            <button class="btn-secondary" @click="closeMemberProfile">Back to Volume</button>
+            <button class="btn-secondary icon-btn" @click="closeMemberProfile">
+              <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M15 18l-6-6 6-6" />
+              </svg>
+              <span>Back to Volume</span>
+            </button>
           </section>
         </section>
 
         <section v-else-if="activeView === 'volume'" class="space-y-4">
           <section class="panel">
             <h2 class="text-3xl font-semibold tracking-tight">{{ greetingMessage }}, {{ firstName }}</h2>
-            <p class="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
+            <p class="mt-1 text-sm text-zinc-600 dark:text-zinc-300">
               Volume {{ selectedVolumeLabel ?? currentVolume }} dashboard at a glance.
             </p>
           </section>
@@ -2298,23 +2605,23 @@ function closeMemberProfile() {
           <section class="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
             <article class="card">
               <p class="text-2xl font-semibold">{{ dashboardStats.booksRead }}</p>
-              <p class="text-sm text-zinc-600 dark:text-zinc-400">Books in Library</p>
+              <p class="text-sm text-zinc-600 dark:text-zinc-300">Books in Library</p>
             </article>
             <article class="card">
               <p class="text-2xl font-semibold">{{ dashboardStats.activeMembers }}</p>
-              <p class="text-sm text-zinc-600 dark:text-zinc-400">Active Members</p>
+              <p class="text-sm text-zinc-600 dark:text-zinc-300">Active Members</p>
             </article>
             <article class="card">
               <p class="text-2xl font-semibold">{{ dashboardStats.discussions }}</p>
-              <p class="text-sm text-zinc-600 dark:text-zinc-400">Discussions</p>
+              <p class="text-sm text-zinc-600 dark:text-zinc-300">Discussions</p>
             </article>
             <article class="card">
               <p class="text-2xl font-semibold">{{ dashboardStats.upcomingEvents }}</p>
-              <p class="text-sm text-zinc-600 dark:text-zinc-400">Upcoming Events</p>
+              <p class="text-sm text-zinc-600 dark:text-zinc-300">Upcoming Events</p>
             </article>
             <article class="card">
               <p class="text-2xl font-semibold">{{ selectedVolumeBooks.length }}</p>
-              <p class="text-sm text-zinc-600 dark:text-zinc-400">
+              <p class="text-sm text-zinc-600 dark:text-zinc-300">
                 Books in Volume {{ selectedVolumeLabel ?? currentVolume }}
               </p>
             </article>
@@ -2337,13 +2644,13 @@ function closeMemberProfile() {
                   />
                   <div
                     v-else
-                    class="flex h-full w-full items-center justify-center bg-gradient-to-br from-[#F2EFDF] to-zinc-200 text-center text-sm font-medium text-zinc-600 dark:from-[#23260F] dark:to-zinc-900 dark:text-zinc-300"
+                    class="flex h-full w-full items-center justify-center bg-gradient-to-br from-[#F2EFDF] to-zinc-200 text-center text-sm font-medium text-zinc-600 dark:from-[#1A1E0B] dark:to-[#131708] dark:text-zinc-300"
                   >
                     Add a featured image from book details
                   </div>
                 </div>
                 <div class="h-1/3 p-4 sm:p-5">
-                  <p class="text-xs font-semibold uppercase tracking-wide text-[#607EA6] dark:text-[#9BA7BF]">
+                  <p class="text-xs font-semibold uppercase tracking-wide text-[#B59A57] dark:text-[#B59A57]">
                     Featured Book
                   </p>
                   <h3 class="mt-1 text-2xl font-semibold leading-tight">{{ featuredBook.title }}</h3>
@@ -2351,7 +2658,7 @@ function closeMemberProfile() {
                   <div class="mt-2 flex flex-wrap items-center gap-2 text-xs">
                     <p
                       v-if="featuredBook.isCompleted"
-                      class="font-semibold uppercase tracking-wide text-[#607EA6] dark:text-[#9BA7BF]"
+                      class="font-semibold uppercase tracking-wide text-[#B59A57] dark:text-[#B59A57]"
                     >
                       Completed
                     </p>
@@ -2359,28 +2666,35 @@ function closeMemberProfile() {
                       ★ {{ featuredBook.averageRating.toFixed(1) }} ({{ featuredBook.ratingsCount }})
                     </p>
                   </div>
-                  <p class="mt-2 text-sm text-zinc-600 dark:text-zinc-400">
-                    {{ featuredBook.month }} {{ featuredBook.year }} in Volume {{ selectedVolumeLabel ?? currentVolume }}
-                  </p>
-                  <p class="mt-2 text-sm font-medium text-[#607EA6] dark:text-[#9BA7BF]">Open details</p>
+                  <div class="mt-2 flex items-center justify-between gap-3">
+                    <p class="min-w-0 text-sm text-zinc-600 dark:text-zinc-300">
+                      {{ featuredBook.month }} {{ featuredBook.year }} in Volume {{ selectedVolumeLabel ?? currentVolume }}
+                    </p>
+                    <p class="inline-flex shrink-0 items-center gap-1 text-sm font-medium text-[#B59A57] dark:text-[#B59A57]">
+                      <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M9 18l6-6-6-6" />
+                      </svg>
+                      <span>Open details</span>
+                    </p>
+                  </div>
                 </div>
               </div>
             </button>
             <section v-else class="panel">
               <h3 class="text-xl font-semibold">Featured Book</h3>
-              <p class="mt-2 text-sm text-zinc-600 dark:text-zinc-400">No featured book set for this volume yet.</p>
+              <p class="mt-2 text-sm text-zinc-600 dark:text-zinc-300">No featured book set for this volume yet.</p>
             </section>
 
             <section class="panel space-y-3">
               <h3 class="text-xl font-semibold">
                 Schedule for Volume {{ selectedVolumeLabel ?? currentVolume }}
               </h3>
-              <p class="text-sm text-zinc-600 dark:text-zinc-400">
+              <p class="text-sm text-zinc-600 dark:text-zinc-300">
                 One meeting per book. Admins set each meeting from the book details page.
               </p>
               <p
                 v-if="scheduledBooksForVolume.length === 0"
-                class="text-sm text-zinc-600 dark:text-zinc-400"
+                class="text-sm text-zinc-600 dark:text-zinc-300"
               >
                 No meetings assigned for this volume yet.
               </p>
@@ -2392,11 +2706,11 @@ function closeMemberProfile() {
                     @click="openBookDetails(book.id)"
                   >
                     <p class="font-semibold">{{ book.title }}</p>
-                    <p class="text-sm text-zinc-600 dark:text-zinc-400">{{ book.author }}</p>
-                    <p class="mt-1 text-xs text-zinc-600 dark:text-zinc-400">
+                    <p class="text-sm text-zinc-600 dark:text-zinc-300">{{ book.author }}</p>
+                    <p class="mt-1 text-xs text-zinc-600 dark:text-zinc-300">
                       {{ formatEventDate(book.meetingStartsAt) }} at {{ formatEventTime(book.meetingStartsAt) }}
                     </p>
-                    <p v-if="book.meetingLocation" class="text-xs text-zinc-500 dark:text-zinc-400">
+                    <p v-if="book.meetingLocation" class="text-xs text-zinc-500 dark:text-zinc-300">
                       {{ book.meetingLocation }}
                     </p>
                   </button>
@@ -2408,7 +2722,7 @@ function closeMemberProfile() {
           <section class="grid gap-4 xl:grid-cols-[1.5fr,1fr]">
             <section class="panel">
               <h3 class="text-xl font-semibold">Books from Volume {{ selectedVolumeLabel ?? currentVolume }}</h3>
-              <p v-if="selectedVolumeBooks.length === 0" class="mt-3 text-sm text-zinc-600 dark:text-zinc-400">
+              <p v-if="selectedVolumeBooks.length === 0" class="mt-3 text-sm text-zinc-600 dark:text-zinc-300">
                 No books in this volume yet.
               </p>
               <div class="mt-3 grid gap-3 lg:grid-cols-2">
@@ -2426,28 +2740,33 @@ function closeMemberProfile() {
                         :alt="`Cover of ${book.title}`"
                         class="h-full w-full object-cover"
                       />
-                      <div v-else class="flex h-full w-full items-center justify-center text-center text-[10px] text-zinc-500 dark:text-zinc-400">
+                      <div v-else class="flex h-full w-full items-center justify-center text-center text-[10px] text-zinc-500 dark:text-zinc-300">
                         No cover
                       </div>
                     </div>
                     <div class="min-w-0">
                       <h4 class="text-lg font-semibold">{{ book.title }}</h4>
-                      <p class="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
+                      <p class="mt-1 text-sm text-zinc-600 dark:text-zinc-300">
                         {{ book.author }} | {{ book.month }} {{ book.year }}
                       </p>
                       <p
                         v-if="book.isCompleted"
-                        class="mt-1 text-xs font-semibold uppercase tracking-wide text-[#607EA6] dark:text-[#9BA7BF]"
+                        class="mt-1 text-xs font-semibold uppercase tracking-wide text-[#B59A57] dark:text-[#B59A57]"
                       >
                         Completed
                       </p>
                       <p v-if="book.ratingsCount > 0" class="mt-1 text-xs text-amber-700 dark:text-amber-300">
                         ★ {{ book.averageRating.toFixed(1) }} ({{ book.ratingsCount }})
                       </p>
-                      <p class="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
+                      <p class="mt-2 text-xs text-zinc-500 dark:text-zinc-300">
                         {{ book.comments.length }} comment{{ book.comments.length === 1 ? "" : "s" }}
                       </p>
-                      <p class="mt-2 text-sm font-medium text-[#607EA6] dark:text-[#9BA7BF]">Open details</p>
+                      <p class="mt-2 inline-flex items-center gap-1 text-sm font-medium text-[#B59A57] dark:text-[#B59A57]">
+                        <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                          <path stroke-linecap="round" stroke-linejoin="round" d="M9 18l6-6-6-6" />
+                        </svg>
+                        <span>Open details</span>
+                      </p>
                     </div>
                   </div>
                 </button>
@@ -2456,10 +2775,10 @@ function closeMemberProfile() {
 
             <section class="panel">
               <h3 class="text-xl font-semibold">Club Members</h3>
-              <p class="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
+              <p class="mt-1 text-sm text-zinc-600 dark:text-zinc-300">
                 Visible to everyone. Admins can approve new members in Admin.
               </p>
-              <p v-if="members.length === 0" class="mt-3 text-sm text-zinc-600 dark:text-zinc-400">
+              <p v-if="members.length === 0" class="mt-3 text-sm text-zinc-600 dark:text-zinc-300">
                 No active members yet.
               </p>
               <ul v-else class="mt-3 space-y-2">
@@ -2482,7 +2801,7 @@ function closeMemberProfile() {
                       </div>
                       <div class="min-w-0">
                         <p class="font-medium text-zinc-900 dark:text-zinc-100">{{ member.name }}</p>
-                        <p class="text-xs text-zinc-500 dark:text-zinc-400">
+                        <p class="text-xs text-zinc-500 dark:text-zinc-300">
                           Joined {{ formatDate(member.createdAt) }}
                         </p>
                       </div>
@@ -2490,11 +2809,11 @@ function closeMemberProfile() {
                     <div class="shrink-0 text-right">
                       <p
                         class="text-xs font-semibold uppercase tracking-wide"
-                        :class="member.role === 'admin' ? 'text-amber-700 dark:text-amber-300' : 'text-zinc-500 dark:text-zinc-400'"
+                        :class="member.role === 'admin' ? 'text-amber-700 dark:text-amber-300' : 'text-zinc-500 dark:text-zinc-300'"
                       >
                         {{ member.role }}
                       </p>
-                      <p class="text-xs text-zinc-500 dark:text-zinc-400">
+                      <p class="text-xs text-zinc-500 dark:text-zinc-300">
                         {{ member.commentsCount }} comment{{ member.commentsCount === 1 ? "" : "s" }}
                       </p>
                     </div>
@@ -2510,16 +2829,16 @@ function closeMemberProfile() {
             <div class="flex flex-wrap items-center gap-3">
               <h3 class="text-2xl font-semibold">Admin: Import Reading List</h3>
               <span
-                class="rounded border border-[#607EA6]/60 bg-[#607EA6]/10 px-2 py-0.5 text-xs font-semibold uppercase tracking-wide text-[#607EA6] dark:text-[#9BA7BF]"
+                class="rounded border border-[#B59A57]/60 bg-[#B59A57]/10 px-2 py-0.5 text-xs font-semibold uppercase tracking-wide text-[#B59A57] dark:text-[#B59A57]"
               >
                 Admin
               </span>
             </div>
             <div class="h-px bg-zinc-200 dark:bg-zinc-800"></div>
-            <div class="inline-flex rounded-xl border border-zinc-200 bg-zinc-50 p-1 dark:border-zinc-700 dark:bg-zinc-900/60">
+            <div class="inline-flex rounded-xl border border-zinc-200 bg-zinc-50 p-1 dark:border-[#3B4013] dark:bg-[#1A200B]/85">
               <button
                 type="button"
-                class="rounded-lg px-4 py-2 text-sm font-semibold transition"
+                class="icon-btn rounded-lg px-4 py-2 text-sm font-semibold transition"
                 :class="
                   adminTab === 'single'
                     ? 'bg-[#B59A57] text-[#23260F] dark:bg-[#B59A57] dark:text-[#23260F]'
@@ -2527,11 +2846,15 @@ function closeMemberProfile() {
                 "
                 @click="adminTab = 'single'"
               >
-                Single Record
+                <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M7 4h10l3 3v13H4V4h3z"></path>
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M8 12h8M8 16h5"></path>
+                </svg>
+                <span>Single Record</span>
               </button>
               <button
                 type="button"
-                class="rounded-lg px-4 py-2 text-sm font-semibold transition"
+                class="icon-btn rounded-lg px-4 py-2 text-sm font-semibold transition"
                 :class="
                   adminTab === 'bulk'
                     ? 'bg-[#B59A57] text-[#23260F] dark:bg-[#B59A57] dark:text-[#23260F]'
@@ -2539,11 +2862,16 @@ function closeMemberProfile() {
                 "
                 @click="adminTab = 'bulk'"
               >
-                Bulk Import
+                <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M12 16V4"></path>
+                  <path stroke-linecap="round" stroke-linejoin="round" d="m7 9 5-5 5 5"></path>
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M20 16.5v2A1.5 1.5 0 0 1 18.5 20h-13A1.5 1.5 0 0 1 4 18.5v-2"></path>
+                </svg>
+                <span>Bulk Import</span>
               </button>
               <button
                 type="button"
-                class="rounded-lg px-4 py-2 text-sm font-semibold transition"
+                class="icon-btn rounded-lg px-4 py-2 text-sm font-semibold transition"
                 :class="
                   adminTab === 'approvals'
                     ? 'bg-[#B59A57] text-[#23260F] dark:bg-[#B59A57] dark:text-[#23260F]'
@@ -2551,14 +2879,18 @@ function closeMemberProfile() {
                 "
                 @click="adminTab = 'approvals'"
               >
-                Approvals <span class="text-amber-500">• {{ pendingUsers.length }}</span>
+                <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M16 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z"></path>
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M4 20a8 8 0 0 1 16 0"></path>
+                </svg>
+                <span>Approvals <span class="text-amber-500">• {{ pendingUsers.length }}</span></span>
               </button>
             </div>
           </section>
 
           <section v-if="adminTab === 'single'" class="panel space-y-5">
             <div class="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-200 pb-4 dark:border-zinc-800">
-              <p class="text-xs font-semibold uppercase tracking-[0.16em] text-zinc-600 dark:text-zinc-400">New Record</p>
+              <p class="text-xs font-semibold uppercase tracking-[0.16em] text-zinc-600 dark:text-zinc-300">New Record</p>
               <label class="field-label max-w-[220px]">
                 Mode
                 <select v-model="uploadMode" class="input">
@@ -2585,11 +2917,15 @@ function closeMemberProfile() {
                 </label>
                 <button
                   type="button"
-                  class="btn-secondary"
+                  class="btn-secondary icon-btn"
                   :disabled="singleRecordIsbnLookupLoading"
                   @click="autofillSingleRecordFromIsbn(true)"
                 >
-                  {{ singleRecordIsbnLookupLoading ? "Looking up..." : "Autofill from ISBN" }}
+                  <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                    <circle cx="11" cy="11" r="7"></circle>
+                    <path stroke-linecap="round" stroke-linejoin="round" d="m20 20-3.2-3.2"></path>
+                  </svg>
+                  <span>{{ singleRecordIsbnLookupLoading ? "Looking up..." : "Autofill from ISBN" }}</span>
                 </button>
               </div>
 
@@ -2598,8 +2934,8 @@ function closeMemberProfile() {
                 class="text-sm"
                 :class="
                   singleRecordLookupMessageTone === 'error'
-                    ? 'text-rose-600 dark:text-rose-300'
-                    : 'text-[#607EA6] dark:text-[#9BA7BF]'
+                    ? 'text-[#A62014] dark:text-[#A62014]'
+                    : 'text-[#B59A57] dark:text-[#B59A57]'
                 "
               >
                 {{ singleRecordLookupMessage }}
@@ -2669,11 +3005,18 @@ function closeMemberProfile() {
               </div>
 
               <div class="flex flex-wrap items-center justify-between gap-3 border-t border-zinc-200 pt-4 dark:border-zinc-800">
-                <button type="button" class="btn-secondary" :disabled="singleRecordSubmitting" @click="resetSingleRecordForm">
-                  Reset
+                <button type="button" class="btn-secondary icon-btn" :disabled="singleRecordSubmitting" @click="resetSingleRecordForm">
+                  <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M3 12a9 9 0 1 0 3-6.7"></path>
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M3 4v5h5"></path>
+                  </svg>
+                  <span>Reset</span>
                 </button>
-                <button class="btn-primary" :disabled="singleRecordSubmitting">
-                  {{ singleRecordSubmitting ? "Adding..." : "Add Record" }}
+                <button class="btn-primary icon-btn" :disabled="singleRecordSubmitting">
+                  <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 5v14M5 12h14"></path>
+                  </svg>
+                  <span>{{ singleRecordSubmitting ? "Adding..." : "Add Record" }}</span>
                 </button>
               </div>
             </form>
@@ -2684,25 +3027,28 @@ function closeMemberProfile() {
                   Session Records
                 </h4>
                 <button
-                  class="btn-secondary px-2 py-1 text-xs"
+                  class="btn-secondary icon-btn px-2 py-1 text-xs"
                   :disabled="singleRecordSession.length === 0"
                   @click="clearSingleRecordSession"
                 >
-                  Clear
+                  <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M18 6 6 18M6 6l12 12"></path>
+                  </svg>
+                  <span>Clear</span>
                 </button>
               </div>
-              <p v-if="singleRecordSession.length === 0" class="text-sm text-zinc-600 dark:text-zinc-400">
+              <p v-if="singleRecordSession.length === 0" class="text-sm text-zinc-600 dark:text-zinc-300">
                 No records added this session.
               </p>
               <ul v-else class="space-y-2">
                 <li v-for="record in singleRecordSession" :key="record.id" class="comment-row">
                   <div class="min-w-0">
                     <p class="font-medium text-zinc-900 dark:text-zinc-100">{{ record.title }}</p>
-                    <p class="text-xs text-zinc-600 dark:text-zinc-400">
+                    <p class="text-xs text-zinc-600 dark:text-zinc-300">
                       Volume {{ record.volume }} • {{ record.month }} {{ record.year }} • {{ record.author }}
                     </p>
                   </div>
-                  <span class="text-xs text-zinc-500 dark:text-zinc-400">{{ record.isbn }}</span>
+                  <span class="text-xs text-zinc-500 dark:text-zinc-300">{{ record.isbn }}</span>
                 </li>
               </ul>
             </section>
@@ -2711,7 +3057,7 @@ function closeMemberProfile() {
           <section v-else-if="adminTab === 'bulk'" class="space-y-5">
             <section class="panel space-y-5">
               <div class="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-200 pb-4 dark:border-zinc-800">
-                <p class="text-xs font-semibold uppercase tracking-[0.16em] text-zinc-600 dark:text-zinc-400">Bulk Import</p>
+                <p class="text-xs font-semibold uppercase tracking-[0.16em] text-zinc-600 dark:text-zinc-300">Bulk Import</p>
                 <label class="field-label max-w-[220px]">
                   Mode
                   <select v-model="uploadMode" class="input">
@@ -2724,7 +3070,16 @@ function closeMemberProfile() {
               <div class="field-label">
                 File (.csv or .json)
                 <label
-                  class="input flex cursor-pointer items-center gap-2 text-zinc-600 hover:border-[#B59A57] hover:text-zinc-800 dark:text-zinc-300 dark:hover:border-[#B59A57] dark:hover:text-zinc-100"
+                  class="input flex min-h-20 cursor-pointer items-center gap-2 text-zinc-600 hover:border-[#B59A57] hover:text-zinc-800 dark:text-zinc-300 dark:hover:border-[#B59A57] dark:hover:text-zinc-100"
+                  :class="
+                    readingListDropActive
+                      ? 'border-[#B59A57] bg-[#B59A57]/10 text-zinc-900 dark:bg-[#3B4013]/50 dark:text-zinc-100'
+                      : ''
+                  "
+                  @dragenter.prevent="onReadingListDragOver"
+                  @dragover.prevent="onReadingListDragOver"
+                  @dragleave.prevent="onReadingListDragLeave"
+                  @drop.prevent="onReadingListDrop"
                 >
                   <input
                     class="sr-only"
@@ -2733,7 +3088,7 @@ function closeMemberProfile() {
                     @change="setReadingListFile"
                   />
                   <svg
-                    class="h-4 w-4 shrink-0 text-[#607EA6] dark:text-[#9BA7BF]"
+                    class="h-4 w-4 shrink-0 text-[#B59A57] dark:text-[#B59A57]"
                     viewBox="0 0 24 24"
                     fill="none"
                     stroke="currentColor"
@@ -2747,12 +3102,18 @@ function closeMemberProfile() {
                     <path d="M20 16.5v2a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18.5v-2"></path>
                   </svg>
                   <span class="truncate text-sm">
-                    {{ readingListFile ? readingListFile.name : "Upload CSV or JSON..." }}
+                    {{
+                      readingListFile
+                        ? readingListFile.name
+                        : readingListDropActive
+                          ? "Drop CSV or JSON file to import"
+                          : "Drop CSV or JSON here, or click to browse"
+                    }}
                   </span>
                 </label>
               </div>
 
-              <div class="card space-y-3 text-sm leading-relaxed text-zinc-600 dark:text-zinc-400">
+              <div class="card space-y-3 text-sm leading-relaxed text-zinc-600 dark:text-zinc-300">
                 <p class="text-xs font-semibold uppercase tracking-wide text-zinc-700 dark:text-zinc-300">Column Reference</p>
                 <p>Required: `volume`, `title`, `author`, `month`.</p>
                 <p>Optional: `year` (scheduled read year), `isbn`, `meetingStartsAt`, `meetingLocation`, `thumbnailUrl`, `isFeatured`, `resources`.</p>
@@ -2762,26 +3123,38 @@ function closeMemberProfile() {
               <div class="flex flex-wrap items-center justify-between gap-3 border-t border-zinc-200 pt-4 dark:border-zinc-800">
                 <div class="flex flex-wrap gap-3">
                   <button
-                    class="btn-danger"
+                    class="btn-danger icon-btn"
                     :disabled="uploadingReadingList || clearingVolume || clearingUploadHistory || backfillingCovers"
                     @click="clearVolumeBooks"
                   >
-                    {{ clearingVolume ? "Clearing..." : "Clear Volume" }}
+                    <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M18 6 6 18M6 6l12 12"></path>
+                    </svg>
+                    <span>{{ clearingVolume ? "Clearing..." : "Clear Volume" }}</span>
                   </button>
                   <button
-                    class="btn-secondary"
+                    class="btn-secondary icon-btn"
                     :disabled="uploadingReadingList || clearingVolume || clearingUploadHistory || backfillingCovers"
                     @click="backfillCoverImages"
                   >
-                    {{ backfillingCovers ? "Backfilling..." : "Backfill Covers" }}
+                    <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M3 12a9 9 0 1 0 3-6.7"></path>
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M3 4v5h5"></path>
+                    </svg>
+                    <span>{{ backfillingCovers ? "Backfilling..." : "Backfill Covers" }}</span>
                   </button>
                 </div>
                 <button
-                  class="btn-primary"
+                  class="btn-primary icon-btn"
                   :disabled="uploadingReadingList || clearingVolume || clearingUploadHistory || backfillingCovers"
                   @click="uploadReadingList"
                 >
-                  {{ uploadingReadingList ? "Uploading..." : "Import" }}
+                  <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 16V4"></path>
+                    <path stroke-linecap="round" stroke-linejoin="round" d="m7 9 5-5 5 5"></path>
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M20 16.5v2A1.5 1.5 0 0 1 18.5 20h-13A1.5 1.5 0 0 1 4 18.5v-2"></path>
+                  </svg>
+                  <span>{{ uploadingReadingList ? "Uploading..." : "Import" }}</span>
                 </button>
               </div>
             </section>
@@ -2792,20 +3165,23 @@ function closeMemberProfile() {
                   Recent Uploads
                 </h4>
                 <button
-                  class="btn-secondary px-2 py-1 text-xs"
+                  class="btn-secondary icon-btn px-2 py-1 text-xs"
                   :disabled="clearingUploadHistory || uploadHistory.length === 0"
                   @click="clearUploadHistory"
                 >
-                  {{ clearingUploadHistory ? "Clearing..." : "Clear History" }}
+                  <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M18 6 6 18M6 6l12 12"></path>
+                  </svg>
+                  <span>{{ clearingUploadHistory ? "Clearing..." : "Clear History" }}</span>
                 </button>
               </div>
-              <p v-if="uploadHistory.length === 0" class="text-sm text-zinc-600 dark:text-zinc-400">
+              <p v-if="uploadHistory.length === 0" class="text-sm text-zinc-600 dark:text-zinc-300">
                 No uploads yet.
               </p>
               <ul v-else class="space-y-3">
                 <li v-for="upload in uploadHistory" :key="upload.id" class="comment-row py-3">
                   <span>{{ upload.filename }} ({{ formatUploadMode(upload.mode) }}, {{ upload.rowsImported }} {{ upload.mode === "clear" ? "deleted" : upload.mode === "backfill" ? "updated" : "rows" }})</span>
-                  <small class="text-xs text-zinc-500 dark:text-zinc-400">
+                  <small class="text-xs text-zinc-500 dark:text-zinc-300">
                     {{ formatDate(upload.createdAt) }}
                   </small>
                 </li>
@@ -2817,24 +3193,39 @@ function closeMemberProfile() {
             <h4 class="text-sm font-semibold uppercase tracking-wide text-zinc-700 dark:text-zinc-300">
               Pending Approvals
             </h4>
-            <p v-if="pendingUsers.length === 0" class="text-sm text-zinc-600 dark:text-zinc-400">
+            <p v-if="pendingUsers.length === 0" class="text-sm text-zinc-600 dark:text-zinc-300">
               No pending users.
             </p>
             <ul v-else class="space-y-3">
               <li v-for="pendingUser in pendingUsers" :key="pendingUser.id" class="comment-row py-3">
                 <div class="min-w-0">
                   <p class="font-medium text-zinc-900 dark:text-zinc-100">{{ pendingUser.name }}</p>
-                  <p class="truncate text-xs text-zinc-600 dark:text-zinc-400">
+                  <p class="truncate text-xs text-zinc-600 dark:text-zinc-300">
                     {{ pendingUser.email }}
                   </p>
                 </div>
-                <button
-                  class="btn-primary shrink-0"
-                  :disabled="approvingUserId === String(pendingUser.id)"
-                  @click="approvePendingUser(pendingUser)"
-                >
-                  {{ approvingUserId === String(pendingUser.id) ? "Approving..." : "Approve" }}
-                </button>
+                <div class="flex shrink-0 items-center gap-2">
+                  <button
+                    class="btn-danger icon-btn"
+                    :disabled="approvingUserId === String(pendingUser.id) || denyingUserId === String(pendingUser.id)"
+                    @click="denyPendingUser(pendingUser)"
+                  >
+                    <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M18 6 6 18M6 6l12 12"></path>
+                    </svg>
+                    <span>{{ denyingUserId === String(pendingUser.id) ? "Denying..." : "Deny" }}</span>
+                  </button>
+                  <button
+                    class="btn-primary icon-btn"
+                    :disabled="approvingUserId === String(pendingUser.id) || denyingUserId === String(pendingUser.id)"
+                    @click="approvePendingUser(pendingUser)"
+                  >
+                    <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="m20 6-11 11-5-5"></path>
+                    </svg>
+                    <span>{{ approvingUserId === String(pendingUser.id) ? "Approving..." : "Approve" }}</span>
+                  </button>
+                </div>
               </li>
             </ul>
           </section>
@@ -2844,8 +3235,8 @@ function closeMemberProfile() {
             class="text-sm"
             :class="
               adminMessageTone === 'error'
-                ? 'text-rose-600 dark:text-rose-300'
-                : 'text-[#607EA6] dark:text-[#9BA7BF]'
+                ? 'text-[#A62014] dark:text-[#A62014]'
+                : 'text-[#B59A57] dark:text-[#B59A57]'
             "
           >
             {{ adminMessage }}

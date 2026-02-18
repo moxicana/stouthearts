@@ -1891,6 +1891,56 @@ function updateFeaturedImageForBookForAllUsers(requestUserId, referenceBookId, f
   return applyTransaction();
 }
 
+function deleteBookForAllUsers(requestUserId, referenceBookId) {
+  const referenceBook = db
+    .prepare(
+      `
+      SELECT id, title, author, volume
+      FROM books
+      WHERE id = ? AND user_id = ?
+    `
+    )
+    .get(referenceBookId, requestUserId);
+  if (!referenceBook) {
+    return null;
+  }
+
+  const featuredImageUrls = db
+    .prepare(
+      `
+      SELECT DISTINCT featured_image_url AS featuredImageUrl
+      FROM books
+      WHERE volume = ? AND lower(title) = lower(?) AND lower(author) = lower(?) AND featured_image_url IS NOT NULL
+    `
+    )
+    .all(referenceBook.volume, referenceBook.title, referenceBook.author)
+    .map((row) => row.featuredImageUrl)
+    .filter(Boolean);
+
+  const applyTransaction = db.transaction(() => {
+    const usersAffected = db.prepare("SELECT COUNT(*) AS count FROM users").get().count;
+    const booksDeleted = db
+      .prepare(
+        `
+        DELETE FROM books
+        WHERE volume = ? AND lower(title) = lower(?) AND lower(author) = lower(?)
+      `
+      )
+      .run(referenceBook.volume, referenceBook.title, referenceBook.author).changes;
+
+    return {
+      usersAffected,
+      booksDeleted,
+      volume: referenceBook.volume,
+      title: referenceBook.title,
+      author: referenceBook.author,
+      featuredImageUrls
+    };
+  });
+
+  return applyTransaction();
+}
+
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true });
 });
@@ -2041,6 +2091,38 @@ app.post(
         email: user.email,
         role: user.role,
         isApproved: true
+      }
+    });
+  }
+);
+
+app.post(
+  "/api/admin/users/:userId/deny",
+  requireAuth,
+  requireRole("admin"),
+  adminLimiter,
+  (req, res) => {
+    const parsed = pendingUserIdSchema.safeParse(req.params);
+    if (!parsed.success) {
+      return res.status(400).json({ error: "Invalid user id." });
+    }
+
+    const user = db
+      .prepare("SELECT id, name, email, role, is_approved AS isApproved FROM users WHERE id = ?")
+      .get(parsed.data.userId);
+    if (!user) {
+      return res.status(404).json({ error: "User not found." });
+    }
+    if (Boolean(user.isApproved)) {
+      return res.status(400).json({ error: "Only pending users can be denied." });
+    }
+
+    db.prepare("DELETE FROM users WHERE id = ?").run(parsed.data.userId);
+    return res.json({
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email
       }
     });
   }
@@ -2298,6 +2380,30 @@ app.post(
         volume: summary.volume
       }
     });
+  }
+);
+
+app.delete(
+  "/api/admin/books/:bookId",
+  requireAuth,
+  requireRole("admin"),
+  adminLimiter,
+  (req, res) => {
+    const parsed = featureBookParamsSchema.safeParse(req.params);
+    if (!parsed.success) {
+      return res.status(400).json({ error: "Invalid book id." });
+    }
+
+    const summary = deleteBookForAllUsers(req.userId, parsed.data.bookId);
+    if (!summary) {
+      return res.status(404).json({ error: "Book not found." });
+    }
+
+    for (const imageUrl of summary.featuredImageUrls || []) {
+      removeStoredFeaturedImageIfUnused(imageUrl);
+    }
+
+    return res.json({ summary });
   }
 );
 
