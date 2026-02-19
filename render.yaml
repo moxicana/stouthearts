@@ -1,0 +1,28 @@
+services:
+  - type: web
+    name: stouthearts-api
+    runtime: node
+    plan: starter
+    autoDeploy: true
+    buildCommand: npm ci
+    startCommand: npm run start:api
+    healthCheckPath: /api/health
+    disk:
+      name: stouthearts-data
+      mountPath: /opt/render/project/src/server/data
+      sizeGB: 5
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3000
+      - key: JWT_SECRET
+        generateValue: true
+      - key: CLIENT_ORIGIN
+        sync: false
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: COVER_ENRICHMENT_ENABLED
+        value: "true"
+      - key: COVER_LOOKUP_TIMEOUT_MS
+        value: "3000"

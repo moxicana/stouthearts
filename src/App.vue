@@ -40,6 +40,9 @@ const uploadingReadingList = ref(false);
 const clearingVolume = ref(false);
 const clearingUploadHistory = ref(false);
 const backfillingCovers = ref(false);
+const backfillingThriftBooks = ref(false);
+const uploadingFeaturedFallbacks = ref(false);
+const removingFeaturedFallbackUrl = ref("");
 const errorMessage = ref("");
 const adminMessage = ref("");
 const adminMessageTone = ref("success");
@@ -65,9 +68,12 @@ const selectedVolume = ref(null);
 const showVolumeMenu = ref(false);
 const commentDrafts = ref({});
 const uploadHistory = ref([]);
+const featuredImageFallbackUrls = ref([]);
+const featuredFallbackDropActive = ref(false);
 const pendingUsers = ref([]);
 const approvingUserId = ref("");
 const denyingUserId = ref("");
+const promotingMemberId = ref("");
 const uploadMode = ref("append");
 const readingListFile = ref(null);
 const readingListDropActive = ref(false);
@@ -164,6 +170,7 @@ const selectedBook = computed(() => {
   }
   return null;
 });
+const selectedBookFeaturedImageUrl = computed(() => resolveFeaturedImageUrl(selectedBook.value));
 const selectedBookCompletionStats = computed(() => {
   const participants = Math.max(Number(selectedBook.value?.participantsCount || 0), 0);
   const completed = Math.max(Number(selectedBook.value?.completedCount || 0), 0);
@@ -216,6 +223,7 @@ const isOwnProfile = computed(
 const featuredBook = computed(
   () => selectedVolumeBooks.value.find((book) => book.isFeatured) || selectedVolumeBooks.value[0]
 );
+const featuredBookDisplayImageUrl = computed(() => resolveFeaturedImageUrl(featuredBook.value));
 const scheduledBooksForVolume = computed(() =>
   [...selectedVolumeBooks.value]
     .filter((book) => book.meetingStartsAt)
@@ -426,6 +434,48 @@ function getInitials(name) {
     .join("");
 }
 
+function normalizeFeaturedImageFallbackUrls(value) {
+  if (!Array.isArray(value)) return [];
+  const deduped = [];
+  const seen = new Set();
+  for (const entry of value) {
+    const trimmed = String(entry || "").trim();
+    if (!trimmed) continue;
+    let normalized = "";
+    if (trimmed.startsWith("/")) {
+      normalized = trimmed;
+    } else {
+      try {
+        const parsed = new URL(trimmed);
+        if (!["http:", "https:"].includes(parsed.protocol)) continue;
+        normalized = parsed.toString();
+      } catch {
+        continue;
+      }
+    }
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+    deduped.push(normalized);
+  }
+  return deduped;
+}
+
+function getFeaturedImageFallbackForBook(book) {
+  const urls = featuredImageFallbackUrls.value;
+  if (!book || urls.length === 0) return null;
+  const key = [book.volume || "", book.title || "", book.author || "", book.month || "", book.year || ""].join("|");
+  let hash = 0;
+  for (let index = 0; index < key.length; index += 1) {
+    hash = (hash * 31 + key.charCodeAt(index)) >>> 0;
+  }
+  return urls[hash % urls.length] || null;
+}
+
+function resolveFeaturedImageUrl(book) {
+  if (!book) return null;
+  return book.featuredImageUrl || getFeaturedImageFallbackForBook(book);
+}
+
 function toDateTimeLocal(value) {
   if (!value) return "";
   const date = new Date(value);
@@ -493,6 +543,7 @@ async function bootstrap() {
     }
   } catch {
     user.value = null;
+    featuredImageFallbackUrls.value = [];
     dashboardStats.value = {
       booksRead: 0,
       activeMembers: 0,
@@ -512,6 +563,8 @@ async function loadBooks() {
   const payload = await api("/books");
   currentVolume.value = payload.currentVolume;
   pastVolume.value = payload.pastVolume;
+  const normalizedFallbackUrls = normalizeFeaturedImageFallbackUrls(payload.featuredImageFallbackUrls);
+  featuredImageFallbackUrls.value = normalizedFallbackUrls;
   const groupedVolumes = Array.isArray(payload.volumes)
     ? payload.volumes
     : [
@@ -691,10 +744,14 @@ async function deleteSelectedBookRecord() {
   }
 }
 
+function extractFilesFromEvent(event) {
+  if (event?.target?.files?.length) return Array.from(event.target.files);
+  if (event?.dataTransfer?.files?.length) return Array.from(event.dataTransfer.files);
+  return [];
+}
+
 function extractFileFromEvent(event) {
-  if (event?.target?.files?.[0]) return event.target.files[0];
-  if (event?.dataTransfer?.files?.[0]) return event.dataTransfer.files[0];
-  return null;
+  return extractFilesFromEvent(event)[0] || null;
 }
 
 function clearInputValue(event) {
@@ -1004,6 +1061,9 @@ async function logout() {
     selectedVolume.value = null;
     showVolumeMenu.value = false;
     uploadHistory.value = [];
+    featuredImageFallbackUrls.value = [];
+    featuredFallbackDropActive.value = false;
+    removingFeaturedFallbackUrl.value = "";
     pendingUsers.value = [];
     adminMessage.value = "";
     readingListFile.value = null;
@@ -1029,6 +1089,7 @@ async function logout() {
     featuredImageMessage.value = "";
     adminTab.value = "single";
     singleRecordSession.value = [];
+    uploadingFeaturedFallbacks.value = false;
     resetSingleRecordForm();
     activeView.value = "volume";
     await router.push("/");
@@ -1142,6 +1203,7 @@ async function setFeaturedBookForVolume(bookId) {
 
 function formatUploadMode(value) {
   if (value === "backfill") return "Backfill Covers";
+  if (value === "backfill-thriftbooks") return "Backfill ThriftBooks";
   if (value === "clear") return "Clear Volume";
   return value === "replace" ? "Replace" : "Append";
 }
@@ -1411,6 +1473,124 @@ async function backfillCoverImages() {
   }
 }
 
+async function backfillThriftBooksResources() {
+  adminMessage.value = "";
+  backfillingThriftBooks.value = true;
+  try {
+    const payload = await api("/admin/reading-list/backfill-thriftbooks", {
+      method: "POST"
+    });
+    await loadBooks();
+    await loadUploadHistory();
+    adminMessageTone.value = "success";
+    adminMessage.value = `ThriftBooks backfill complete. Updated ${payload.summary.booksUpdated} book resource list(s) from ${payload.summary.candidates} candidate record(s).`;
+  } catch (error) {
+    adminMessageTone.value = "error";
+    adminMessage.value = error.message;
+  } finally {
+    backfillingThriftBooks.value = false;
+  }
+}
+
+async function uploadFeaturedFallbackImages(files) {
+  if (!isAdmin.value) return;
+  const selectedFiles = Array.isArray(files) ? files.filter(Boolean) : [];
+  if (selectedFiles.length === 0) {
+    adminMessageTone.value = "error";
+    adminMessage.value = "Choose one or more images first.";
+    return;
+  }
+
+  adminMessage.value = "";
+  uploadingFeaturedFallbacks.value = true;
+  try {
+    const formData = new FormData();
+    for (const file of selectedFiles) {
+      formData.append("files", file);
+    }
+    const payload = await api("/admin/settings/featured-image-fallbacks/upload", {
+      method: "POST",
+      body: formData
+    });
+    featuredImageFallbackUrls.value = normalizeFeaturedImageFallbackUrls(payload.urls);
+    adminMessageTone.value = "success";
+    adminMessage.value = `Uploaded ${payload.uploaded || selectedFiles.length} fallback image(s).`;
+  } catch (error) {
+    adminMessageTone.value = "error";
+    adminMessage.value = error.message;
+  } finally {
+    uploadingFeaturedFallbacks.value = false;
+  }
+}
+
+function onFeaturedFallbackDragOver() {
+  if (!isAdmin.value || uploadingFeaturedFallbacks.value) return;
+  featuredFallbackDropActive.value = true;
+}
+
+function onFeaturedFallbackDragLeave() {
+  featuredFallbackDropActive.value = false;
+}
+
+async function onFeaturedFallbackDrop(event) {
+  featuredFallbackDropActive.value = false;
+  if (!isAdmin.value || uploadingFeaturedFallbacks.value) return;
+  const files = extractFilesFromEvent(event);
+  if (files.length === 0) return;
+  await uploadFeaturedFallbackImages(files);
+}
+
+async function onFeaturedFallbackSelected(event) {
+  featuredFallbackDropActive.value = false;
+  const files = extractFilesFromEvent(event);
+  clearInputValue(event);
+  if (files.length === 0) return;
+  await uploadFeaturedFallbackImages(files);
+}
+
+async function removeFeaturedFallbackImage(url) {
+  if (!isAdmin.value || !url || removingFeaturedFallbackUrl.value) return;
+  removingFeaturedFallbackUrl.value = url;
+  adminMessage.value = "";
+  try {
+    const payload = await api("/admin/settings/featured-image-fallbacks", {
+      method: "DELETE",
+      body: JSON.stringify({ url })
+    });
+    featuredImageFallbackUrls.value = normalizeFeaturedImageFallbackUrls(payload.urls);
+    adminMessageTone.value = "success";
+    adminMessage.value = "Fallback image removed.";
+  } catch (error) {
+    adminMessageTone.value = "error";
+    adminMessage.value = error.message;
+  } finally {
+    removingFeaturedFallbackUrl.value = "";
+  }
+}
+
+async function clearFeaturedImageFallbacks() {
+  if (!isAdmin.value || featuredImageFallbackUrls.value.length === 0) return;
+  const confirmed = window.confirm("Clear all uploaded fallback images?");
+  if (!confirmed) return;
+
+  uploadingFeaturedFallbacks.value = true;
+  adminMessage.value = "";
+  try {
+    const payload = await api("/admin/settings/featured-image-fallbacks", {
+      method: "PUT",
+      body: JSON.stringify({ urls: [] })
+    });
+    featuredImageFallbackUrls.value = normalizeFeaturedImageFallbackUrls(payload.urls);
+    adminMessageTone.value = "success";
+    adminMessage.value = "Cleared fallback images.";
+  } catch (error) {
+    adminMessageTone.value = "error";
+    adminMessage.value = error.message;
+  } finally {
+    uploadingFeaturedFallbacks.value = false;
+  }
+}
+
 async function approvePendingUser(pendingUser) {
   if (!pendingUser?.id) return;
   approvingUserId.value = String(pendingUser.id);
@@ -1447,6 +1627,31 @@ async function denyPendingUser(pendingUser) {
     adminMessage.value = error.message;
   } finally {
     denyingUserId.value = "";
+  }
+}
+
+async function promoteMember(member) {
+  if (!isAdmin.value || !member?.id || member.role === "admin") return;
+  const confirmed = window.confirm(`Grant admin privileges to ${member.name}?`);
+  if (!confirmed) return;
+
+  promotingMemberId.value = String(member.id);
+  adminMessage.value = "";
+  try {
+    await api(`/admin/users/${encodeURIComponent(String(member.id))}/promote`, {
+      method: "POST"
+    });
+    await loadDashboard();
+    if (routeMemberId.value === Number(member.id)) {
+      await loadMemberProfile(Number(member.id));
+    }
+    adminMessageTone.value = "success";
+    adminMessage.value = `${member.name} is now an admin.`;
+  } catch (error) {
+    adminMessageTone.value = "error";
+    adminMessage.value = error.message;
+  } finally {
+    promotingMemberId.value = "";
   }
 }
 
@@ -1494,10 +1699,10 @@ function closeMemberProfile() {
 </script>
 
 <template>
-  <main class="min-h-screen bg-[#F2EFDF] text-[#23260F] dark:bg-[#141806] dark:text-[#F2EFDF]">
+  <main class="min-h-screen bg-[#F2EFDF] text-[#23260F] dark:bg-[#0F1115] dark:text-[#E6E8ED]">
     <header
       ref="headerRef"
-      class="fixed inset-x-0 top-0 z-40 border-b border-[#B59A57]/50 bg-[#F2EFDF]/95 backdrop-blur dark:border-[#3B4013] dark:bg-[#141806]/95"
+      class="fixed inset-x-0 top-0 z-40 border-b border-[#D8D2C3] bg-[#F2EFDF]/95 backdrop-blur dark:border-[#313947] dark:bg-[#0F1115]/95"
     >
       <div class="mx-auto flex w-full max-w-screen-2xl flex-wrap items-center justify-between gap-3 px-4 py-4 sm:px-6 lg:px-8">
           <div class="flex min-w-0 flex-wrap items-center gap-3 sm:gap-6">
@@ -1524,7 +1729,7 @@ function closeMemberProfile() {
                 </button>
                 <div
                   v-if="showVolumeMenu"
-                  class="absolute left-0 z-20 mt-2 min-w-56 rounded-md border border-zinc-200 bg-white p-1 shadow-lg dark:border-[#3B4013] dark:bg-[#1A200B]"
+                  class="absolute left-0 z-20 mt-2 min-w-56 rounded-md border border-zinc-200 bg-white p-1 shadow-lg dark:border-[#313947] dark:bg-[#151A22]"
                 >
                   <button
                     v-for="volumeGroup in volumes"
@@ -1709,7 +1914,7 @@ function closeMemberProfile() {
 
           <section
             v-if="DEMO_ACCOUNTS.length > 0"
-            class="mt-5 rounded-xl border border-dashed border-zinc-300 bg-zinc-50 p-3 dark:border-[#3B4013] dark:bg-[#1C230D]/75"
+            class="mt-5 rounded-xl border border-dashed border-zinc-300 bg-zinc-50 p-3 dark:border-[#313947] dark:bg-[#171B22]/75"
           >
             <p class="text-xs font-semibold uppercase tracking-wide text-zinc-600 dark:text-zinc-300">
               Dev Quick Login
@@ -1761,25 +1966,25 @@ function closeMemberProfile() {
                 <p class="text-sm text-zinc-600 dark:text-zinc-300">Volume {{ selectedBook.volume }}</p>
                 <p
                   v-if="selectedBook.isFeatured"
-                  class="text-xs font-semibold uppercase tracking-wide text-[#B59A57] dark:text-[#B59A57]"
+                  class="text-xs font-semibold uppercase tracking-wide text-[#C8963E] dark:text-[#C8963E]"
                 >
                   Featured for Volume
                 </p>
               </div>
             </div>
 
-            <section class="overflow-visible rounded-xl bg-zinc-50/50 dark:bg-[#1C230D]/75">
+            <section class="overflow-visible rounded-xl bg-zinc-50/50 dark:bg-[#171B22]/75">
               <div
                 class="relative h-44 overflow-hidden rounded-t-xl transition sm:h-56"
-                :class="isAdmin && featuredImageDropActive ? 'ring-2 ring-inset ring-[#B59A57]' : ''"
+                :class="isAdmin && featuredImageDropActive ? 'ring-2 ring-inset ring-[#C8963E]' : ''"
                 @dragenter.prevent="onHeaderFeaturedImageDragOver"
                 @dragover.prevent="onHeaderFeaturedImageDragOver"
                 @dragleave.prevent="onHeaderFeaturedImageDragLeave"
                 @drop.prevent="onHeaderFeaturedImageDrop"
               >
                 <img
-                  v-if="selectedBook.featuredImageUrl"
-                  :src="selectedBook.featuredImageUrl"
+                  v-if="selectedBookFeaturedImageUrl"
+                  :src="selectedBookFeaturedImageUrl"
                   :alt="`Featured header for ${selectedBook.title}`"
                   class="absolute inset-0 h-full w-full object-cover"
                   style="
@@ -1789,9 +1994,9 @@ function closeMemberProfile() {
                 />
                 <div
                   v-else
-                  class="absolute inset-0 flex items-center justify-center bg-zinc-100 text-xs font-medium text-zinc-500 dark:bg-[#1F2710] dark:text-zinc-300"
+                  class="absolute inset-0 flex items-center justify-center bg-zinc-100 text-xs font-medium text-zinc-500 dark:bg-[#1D232D] dark:text-zinc-300"
                 >
-                  No featured header image uploaded yet.
+                  Add a featured image or configure admin fallback images.
                 </div>
                 <div class="absolute inset-0 bg-gradient-to-b from-zinc-950/25 via-zinc-950/5 to-transparent"></div>
                 <div
@@ -1840,7 +2045,7 @@ function closeMemberProfile() {
                     class="absolute right-2 top-2 z-20 flex h-8 w-8 items-center justify-center rounded-full border border-white/70 bg-black/55 text-white shadow transition hover:bg-black/70"
                     :class="
                       selectedBook.isFeatured
-                        ? 'border-[#B59A57]/90 bg-black/75 text-[#B59A57] hover:bg-black/75'
+                        ? 'border-[#C8963E]/90 bg-black/75 text-[#C8963E] hover:bg-black/75'
                         : 'text-[#F2EFDF]'
                     "
                     :disabled="featuringBookId === selectedBook.id"
@@ -1864,7 +2069,7 @@ function closeMemberProfile() {
                   >
                     <svg
                       class="h-4 w-4"
-                      :class="selectedBook.isFeatured ? 'text-[#B59A57]' : ''"
+                      :class="selectedBook.isFeatured ? 'text-[#C8963E]' : ''"
                       viewBox="0 0 24 24"
                       fill="currentColor"
                       aria-hidden="true"
@@ -1903,7 +2108,7 @@ function closeMemberProfile() {
               :class="
                 featuredImageMessageTone === 'error'
                   ? 'text-[#A62014] dark:text-[#A62014]'
-                  : 'text-[#B59A57] dark:text-[#B59A57]'
+                  : 'text-[#C8963E] dark:text-[#C8963E]'
               "
             >
               {{ featuredImageMessage }}
@@ -1913,13 +2118,13 @@ function closeMemberProfile() {
               <article class="card space-y-3">
                 <div class="flex flex-wrap items-center justify-between gap-2">
                   <h3 class="text-xl font-semibold">Reading Status</h3>
-                  <span class="rounded-full bg-[#F2EFDF] px-3 py-1 text-xs font-semibold text-[#3B4013] dark:bg-[#1A200B]/75 dark:text-[#F2EFDF]">
+                  <span class="rounded-full bg-[#F2EFDF] px-3 py-1 text-xs font-semibold text-[#313947] dark:bg-[#151A22]/75 dark:text-[#F2EFDF]">
                     {{ selectedBookCompletionStats.completed }} / {{ selectedBookCompletionStats.participants }} completed
                   </span>
                 </div>
-                <div class="h-2 w-full overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700">
+                <div class="h-2 w-full overflow-hidden rounded-full bg-zinc-300 dark:bg-[#3A4252]">
                   <div
-                    class="h-full rounded-full bg-[#B59A57] transition-[width] duration-500 dark:bg-[#B59A57]"
+                    class="h-full rounded-full bg-[#1F9D8A] transition-[width] duration-500 dark:bg-[#26B39D]"
                     :style="{ width: `${selectedBookCompletionStats.percent}%` }"
                   ></div>
                 </div>
@@ -1932,7 +2137,7 @@ function closeMemberProfile() {
                 </p>
 
                 <div class="flex flex-wrap items-center gap-2">
-                  <p v-if="selectedBook.isCompleted" class="text-sm text-[#B59A57] dark:text-[#B59A57]">
+                  <p v-if="selectedBook.isCompleted" class="text-sm text-[#1F9D8A] dark:text-[#26B39D]">
                     Completed
                     <span v-if="selectedBook.completedAt">
                       on {{ formatDate(selectedBook.completedAt) }} at {{ formatCommentTime(selectedBook.completedAt) }}
@@ -2039,7 +2244,7 @@ function closeMemberProfile() {
               <article class="card space-y-3">
                 <div class="flex items-center gap-2">
                   <svg
-                    class="h-4 w-4 text-[#B59A57] dark:text-[#B59A57]"
+                    class="h-4 w-4 text-[#C8963E] dark:text-[#C8963E]"
                     viewBox="0 0 24 24"
                     fill="none"
                     stroke="currentColor"
@@ -2147,7 +2352,7 @@ function closeMemberProfile() {
                   :class="
                     isbnMessageTone === 'error'
                       ? 'text-[#A62014] dark:text-[#A62014]'
-                      : 'text-[#B59A57] dark:text-[#B59A57]'
+                      : 'text-[#C8963E] dark:text-[#C8963E]'
                   "
                 >
                   {{ isbnMessage }}
@@ -2193,7 +2398,7 @@ function closeMemberProfile() {
                   :class="
                     coverMessageTone === 'error'
                       ? 'text-[#A62014] dark:text-[#A62014]'
-                      : 'text-[#B59A57] dark:text-[#B59A57]'
+                      : 'text-[#C8963E] dark:text-[#C8963E]'
                   "
                 >
                   {{ coverMessage }}
@@ -2271,7 +2476,7 @@ function closeMemberProfile() {
                   :class="
                     meetingMessageTone === 'error'
                       ? 'text-[#A62014] dark:text-[#A62014]'
-                      : 'text-[#B59A57] dark:text-[#B59A57]'
+                      : 'text-[#C8963E] dark:text-[#C8963E]'
                   "
                 >
                   {{ meetingMessage }}
@@ -2328,7 +2533,7 @@ function closeMemberProfile() {
                 <li v-for="resource in selectedBook.resources" :key="`${resource.label}-${resource.url}`" class="comment-row">
                   <span>{{ resource.label }}</span>
                   <a
-                    class="text-sm font-medium text-[#B59A57] underline dark:text-[#B59A57]"
+                    class="text-sm font-medium text-[#C8963E] underline dark:text-[#C8963E]"
                     :href="resource.url"
                     target="_blank"
                     rel="noopener noreferrer"
@@ -2449,10 +2654,10 @@ function closeMemberProfile() {
               <div class="field-label space-y-2">
                 <span>Profile Image</span>
                 <label
-                  class="input flex min-h-20 cursor-pointer items-center gap-2 text-zinc-600 hover:border-[#B59A57] hover:text-zinc-800 dark:text-zinc-300 dark:hover:border-[#B59A57] dark:hover:text-zinc-100"
+                  class="input flex min-h-20 cursor-pointer items-center gap-2 text-zinc-600 hover:border-[#C8963E] hover:text-zinc-800 dark:text-zinc-300 dark:hover:border-[#C8963E] dark:hover:text-zinc-100"
                   :class="
                     profileImageDropActive
-                      ? 'border-[#B59A57] bg-[#B59A57]/10 text-zinc-900 dark:bg-[#3B4013]/50 dark:text-zinc-100'
+                      ? 'border-[#C8963E] bg-[#C8963E]/10 text-zinc-900 dark:bg-[#313947]/50 dark:text-zinc-100'
                       : ''
                   "
                   @dragenter.prevent="onProfileImageDragOver"
@@ -2467,7 +2672,7 @@ function closeMemberProfile() {
                     @change="setProfileImageFile"
                   />
                   <svg
-                    class="h-4 w-4 shrink-0 text-[#B59A57] dark:text-[#B59A57]"
+                    class="h-4 w-4 shrink-0 text-[#C8963E] dark:text-[#C8963E]"
                     viewBox="0 0 24 24"
                     fill="none"
                     stroke="currentColor"
@@ -2500,7 +2705,7 @@ function closeMemberProfile() {
                 :class="
                   profileMessageTone === 'error'
                     ? 'text-[#A62014] dark:text-[#A62014]'
-                    : 'text-[#B59A57] dark:text-[#B59A57]'
+                    : 'text-[#C8963E] dark:text-[#C8963E]'
                 "
               >
                 {{ profileMessage }}
@@ -2631,26 +2836,26 @@ function closeMemberProfile() {
             <button
               v-if="featuredBook"
               type="button"
-              class="panel w-full overflow-hidden p-0 text-left transition hover:-translate-y-0.5 hover:border-[#B59A57] dark:hover:border-[#B59A57]"
+              class="panel w-full overflow-hidden p-0 text-left transition hover:-translate-y-0.5 hover:border-[#C8963E] dark:hover:border-[#C8963E]"
               @click="openBookDetails(featuredBook.id)"
             >
               <div class="relative h-[30rem]">
                 <div class="h-2/3 overflow-hidden border-b border-zinc-200 dark:border-zinc-700">
                   <img
-                    v-if="featuredBook.featuredImageUrl"
-                    :src="featuredBook.featuredImageUrl"
+                    v-if="featuredBookDisplayImageUrl"
+                    :src="featuredBookDisplayImageUrl"
                     :alt="`Featured image for ${featuredBook.title}`"
                     class="h-full w-full object-cover"
                   />
                   <div
                     v-else
-                    class="flex h-full w-full items-center justify-center bg-gradient-to-br from-[#F2EFDF] to-zinc-200 text-center text-sm font-medium text-zinc-600 dark:from-[#1A1E0B] dark:to-[#131708] dark:text-zinc-300"
+                    class="flex h-full w-full items-center justify-center bg-gradient-to-br from-[#F2EFDF] to-zinc-200 text-center text-sm font-medium text-zinc-600 dark:from-[#12161D] dark:to-[#0B0E13] dark:text-zinc-300"
                   >
-                    Add a featured image from book details
+                    Add a featured image or configure admin fallback images
                   </div>
                 </div>
                 <div class="h-1/3 p-4 sm:p-5">
-                  <p class="text-xs font-semibold uppercase tracking-wide text-[#B59A57] dark:text-[#B59A57]">
+                  <p class="text-xs font-semibold uppercase tracking-wide text-[#C8963E] dark:text-[#C8963E]">
                     Featured Book
                   </p>
                   <h3 class="mt-1 text-2xl font-semibold leading-tight">{{ featuredBook.title }}</h3>
@@ -2658,7 +2863,7 @@ function closeMemberProfile() {
                   <div class="mt-2 flex flex-wrap items-center gap-2 text-xs">
                     <p
                       v-if="featuredBook.isCompleted"
-                      class="font-semibold uppercase tracking-wide text-[#B59A57] dark:text-[#B59A57]"
+                      class="font-semibold uppercase tracking-wide text-[#C8963E] dark:text-[#C8963E]"
                     >
                       Completed
                     </p>
@@ -2670,7 +2875,7 @@ function closeMemberProfile() {
                     <p class="min-w-0 text-sm text-zinc-600 dark:text-zinc-300">
                       {{ featuredBook.month }} {{ featuredBook.year }} in Volume {{ selectedVolumeLabel ?? currentVolume }}
                     </p>
-                    <p class="inline-flex shrink-0 items-center gap-1 text-sm font-medium text-[#B59A57] dark:text-[#B59A57]">
+                    <p class="inline-flex shrink-0 items-center gap-1 text-sm font-medium text-[#C8963E] dark:text-[#C8963E]">
                       <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M9 18l6-6-6-6" />
                       </svg>
@@ -2702,7 +2907,7 @@ function closeMemberProfile() {
                 <li v-for="book in scheduledBooksForVolume" :key="`meeting-${book.id}`">
                   <button
                     type="button"
-                    class="card w-full text-left transition hover:-translate-y-0.5 hover:border-[#B59A57] dark:hover:border-[#B59A57]"
+                    class="card w-full text-left transition hover:-translate-y-0.5 hover:border-[#C8963E] dark:hover:border-[#C8963E]"
                     @click="openBookDetails(book.id)"
                   >
                     <p class="font-semibold">{{ book.title }}</p>
@@ -2729,7 +2934,7 @@ function closeMemberProfile() {
                 <button
                   v-for="book in selectedVolumeBooks"
                   :key="book.id"
-                  class="card text-left transition hover:-translate-y-0.5 hover:border-[#B59A57] dark:hover:border-[#B59A57]"
+                  class="card text-left transition hover:-translate-y-0.5 hover:border-[#C8963E] dark:hover:border-[#C8963E]"
                   @click="openBookDetails(book.id)"
                 >
                   <div class="flex gap-3">
@@ -2751,7 +2956,7 @@ function closeMemberProfile() {
                       </p>
                       <p
                         v-if="book.isCompleted"
-                        class="mt-1 text-xs font-semibold uppercase tracking-wide text-[#B59A57] dark:text-[#B59A57]"
+                        class="mt-1 text-xs font-semibold uppercase tracking-wide text-[#C8963E] dark:text-[#C8963E]"
                       >
                         Completed
                       </p>
@@ -2761,7 +2966,7 @@ function closeMemberProfile() {
                       <p class="mt-2 text-xs text-zinc-500 dark:text-zinc-300">
                         {{ book.comments.length }} comment{{ book.comments.length === 1 ? "" : "s" }}
                       </p>
-                      <p class="mt-2 inline-flex items-center gap-1 text-sm font-medium text-[#B59A57] dark:text-[#B59A57]">
+                      <p class="mt-2 inline-flex items-center gap-1 text-sm font-medium text-[#C8963E] dark:text-[#C8963E]">
                         <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
                           <path stroke-linecap="round" stroke-linejoin="round" d="M9 18l6-6-6-6" />
                         </svg>
@@ -2776,7 +2981,7 @@ function closeMemberProfile() {
             <section class="panel">
               <h3 class="text-xl font-semibold">Club Members</h3>
               <p class="mt-1 text-sm text-zinc-600 dark:text-zinc-300">
-                Visible to everyone. Admins can approve new members in Admin.
+                Visible to everyone.
               </p>
               <p v-if="members.length === 0" class="mt-3 text-sm text-zinc-600 dark:text-zinc-300">
                 No active members yet.
@@ -2784,7 +2989,7 @@ function closeMemberProfile() {
               <ul v-else class="mt-3 space-y-2">
                 <li v-for="member in members" :key="member.id">
                   <button
-                    class="comment-row w-full text-left transition hover:-translate-y-0.5 hover:border-[#B59A57] dark:hover:border-[#B59A57]"
+                    class="comment-row w-full text-left transition hover:-translate-y-0.5 hover:border-[#C8963E] dark:hover:border-[#C8963E]"
                     @click="openMemberProfile(member.id)"
                   >
                     <div class="flex min-w-0 items-center gap-3">
@@ -2827,21 +3032,21 @@ function closeMemberProfile() {
         <section v-else-if="activeView === 'admin' && isAdmin" class="space-y-5">
           <section class="panel space-y-4">
             <div class="flex flex-wrap items-center gap-3">
-              <h3 class="text-2xl font-semibold">Admin: Import Reading List</h3>
+              <h3 class="text-2xl font-semibold">Admin Console</h3>
               <span
-                class="rounded border border-[#B59A57]/60 bg-[#B59A57]/10 px-2 py-0.5 text-xs font-semibold uppercase tracking-wide text-[#B59A57] dark:text-[#B59A57]"
+                class="rounded border border-[#C8963E]/60 bg-[#C8963E]/10 px-2 py-0.5 text-xs font-semibold uppercase tracking-wide text-[#C8963E] dark:text-[#C8963E]"
               >
                 Admin
               </span>
             </div>
             <div class="h-px bg-zinc-200 dark:bg-zinc-800"></div>
-            <div class="inline-flex rounded-xl border border-zinc-200 bg-zinc-50 p-1 dark:border-[#3B4013] dark:bg-[#1A200B]/85">
+            <div class="inline-flex rounded-xl border border-zinc-200 bg-zinc-50 p-1 dark:border-[#313947] dark:bg-[#151A22]/85">
               <button
                 type="button"
                 class="icon-btn rounded-lg px-4 py-2 text-sm font-semibold transition"
                 :class="
                   adminTab === 'single'
-                    ? 'bg-[#B59A57] text-[#23260F] dark:bg-[#B59A57] dark:text-[#23260F]'
+                    ? 'bg-[#C8963E] text-[#23260F] dark:bg-[#C8963E] dark:text-[#23260F]'
                     : 'text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800'
                 "
                 @click="adminTab = 'single'"
@@ -2857,7 +3062,7 @@ function closeMemberProfile() {
                 class="icon-btn rounded-lg px-4 py-2 text-sm font-semibold transition"
                 :class="
                   adminTab === 'bulk'
-                    ? 'bg-[#B59A57] text-[#23260F] dark:bg-[#B59A57] dark:text-[#23260F]'
+                    ? 'bg-[#C8963E] text-[#23260F] dark:bg-[#C8963E] dark:text-[#23260F]'
                     : 'text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800'
                 "
                 @click="adminTab = 'bulk'"
@@ -2873,8 +3078,24 @@ function closeMemberProfile() {
                 type="button"
                 class="icon-btn rounded-lg px-4 py-2 text-sm font-semibold transition"
                 :class="
+                  adminTab === 'members'
+                    ? 'bg-[#C8963E] text-[#23260F] dark:bg-[#C8963E] dark:text-[#23260F]'
+                    : 'text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800'
+                "
+                @click="adminTab = 'members'"
+              >
+                <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M16 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z"></path>
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M4 20a8 8 0 0 1 16 0"></path>
+                </svg>
+                <span>Members</span>
+              </button>
+              <button
+                type="button"
+                class="icon-btn rounded-lg px-4 py-2 text-sm font-semibold transition"
+                :class="
                   adminTab === 'approvals'
-                    ? 'bg-[#B59A57] text-[#23260F] dark:bg-[#B59A57] dark:text-[#23260F]'
+                    ? 'bg-[#C8963E] text-[#23260F] dark:bg-[#C8963E] dark:text-[#23260F]'
                     : 'text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800'
                 "
                 @click="adminTab = 'approvals'"
@@ -2935,7 +3156,7 @@ function closeMemberProfile() {
                 :class="
                   singleRecordLookupMessageTone === 'error'
                     ? 'text-[#A62014] dark:text-[#A62014]'
-                    : 'text-[#B59A57] dark:text-[#B59A57]'
+                    : 'text-[#C8963E] dark:text-[#C8963E]'
                 "
               >
                 {{ singleRecordLookupMessage }}
@@ -3070,10 +3291,10 @@ function closeMemberProfile() {
               <div class="field-label">
                 File (.csv or .json)
                 <label
-                  class="input flex min-h-20 cursor-pointer items-center gap-2 text-zinc-600 hover:border-[#B59A57] hover:text-zinc-800 dark:text-zinc-300 dark:hover:border-[#B59A57] dark:hover:text-zinc-100"
+                  class="input flex min-h-20 cursor-pointer items-center gap-2 text-zinc-600 hover:border-[#C8963E] hover:text-zinc-800 dark:text-zinc-300 dark:hover:border-[#C8963E] dark:hover:text-zinc-100"
                   :class="
                     readingListDropActive
-                      ? 'border-[#B59A57] bg-[#B59A57]/10 text-zinc-900 dark:bg-[#3B4013]/50 dark:text-zinc-100'
+                      ? 'border-[#C8963E] bg-[#C8963E]/10 text-zinc-900 dark:bg-[#313947]/50 dark:text-zinc-100'
                       : ''
                   "
                   @dragenter.prevent="onReadingListDragOver"
@@ -3088,7 +3309,7 @@ function closeMemberProfile() {
                     @change="setReadingListFile"
                   />
                   <svg
-                    class="h-4 w-4 shrink-0 text-[#B59A57] dark:text-[#B59A57]"
+                    class="h-4 w-4 shrink-0 text-[#C8963E] dark:text-[#C8963E]"
                     viewBox="0 0 24 24"
                     fill="none"
                     stroke="currentColor"
@@ -3120,11 +3341,112 @@ function closeMemberProfile() {
                 <p>Rules: `volume` integer 1-99, `year` 2025-2100, valid ISBN-10/13, valid URLs, valid meeting date/time.</p>
               </div>
 
+              <div class="card space-y-3">
+                <div class="flex flex-wrap items-center justify-between gap-2">
+                  <p class="text-xs font-semibold uppercase tracking-wide text-zinc-700 dark:text-zinc-300">
+                    Featured Image Fallbacks
+                  </p>
+                  <p class="text-xs text-zinc-500 dark:text-zinc-300">
+                    {{ featuredImageFallbackUrls.length }} saved
+                  </p>
+                </div>
+                <p class="text-sm text-zinc-600 dark:text-zinc-300">
+                  Upload image files to use when a book has no featured header image.
+                </p>
+                <div class="field-label">
+                  Upload Fallback Images
+                  <label
+                    class="input flex min-h-20 cursor-pointer items-center gap-2 text-zinc-600 hover:border-[#C8963E] hover:text-zinc-800 dark:text-zinc-300 dark:hover:border-[#C8963E] dark:hover:text-zinc-100"
+                    :class="
+                      featuredFallbackDropActive
+                        ? 'border-[#C8963E] bg-[#C8963E]/10 text-zinc-900 dark:bg-[#313947]/50 dark:text-zinc-100'
+                        : ''
+                    "
+                    @dragenter.prevent="onFeaturedFallbackDragOver"
+                    @dragover.prevent="onFeaturedFallbackDragOver"
+                    @dragleave.prevent="onFeaturedFallbackDragLeave"
+                    @drop.prevent="onFeaturedFallbackDrop"
+                  >
+                    <input
+                      class="sr-only"
+                      type="file"
+                      accept="image/png,image/jpeg,image/webp,image/gif"
+                      multiple
+                      :disabled="uploadingFeaturedFallbacks"
+                      @change="onFeaturedFallbackSelected"
+                    />
+                    <svg
+                      class="h-4 w-4 shrink-0 text-[#C8963E] dark:text-[#C8963E]"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.8"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      aria-hidden="true"
+                    >
+                      <path d="M12 16V4"></path>
+                      <path d="m7 9 5-5 5 5"></path>
+                      <path d="M20 16.5v2a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18.5v-2"></path>
+                    </svg>
+                    <span class="text-sm">
+                      {{
+                        uploadingFeaturedFallbacks
+                          ? "Uploading fallback image(s)..."
+                          : featuredFallbackDropActive
+                            ? "Drop fallback image files to upload"
+                            : "Drop fallback image files here, or click to browse"
+                      }}
+                    </span>
+                  </label>
+                </div>
+                <div class="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    class="btn-danger icon-btn"
+                    :disabled="uploadingFeaturedFallbacks || featuredImageFallbackUrls.length === 0"
+                    @click="clearFeaturedImageFallbacks"
+                  >
+                    <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M18 6 6 18M6 6l12 12"></path>
+                    </svg>
+                    <span>{{ uploadingFeaturedFallbacks ? "Working..." : "Clear All" }}</span>
+                  </button>
+                </div>
+                <p v-if="featuredImageFallbackUrls.length === 0" class="text-sm text-zinc-600 dark:text-zinc-300">
+                  No fallback images uploaded yet.
+                </p>
+                <ul v-else class="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                  <li
+                    v-for="url in featuredImageFallbackUrls"
+                    :key="`fallback-image-${url}`"
+                    class="comment-row flex-col items-stretch gap-2"
+                  >
+                    <div class="aspect-[16/9] overflow-hidden rounded-md border border-zinc-200 bg-zinc-100 dark:border-zinc-700 dark:bg-[#151A22]">
+                      <img :src="url" alt="Fallback image preview" class="h-full w-full object-cover" />
+                    </div>
+                    <div class="flex items-center justify-end">
+                      <button
+                        type="button"
+                        class="btn-danger icon-btn px-2 py-1 text-xs"
+                        :disabled="removingFeaturedFallbackUrl === url || uploadingFeaturedFallbacks"
+                        @click="removeFeaturedFallbackImage(url)"
+                      >
+                        <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                          <path stroke-linecap="round" stroke-linejoin="round" d="M18 6 6 18M6 6l12 12"></path>
+                        </svg>
+                        <span>{{ removingFeaturedFallbackUrl === url ? "Removing..." : "Remove" }}</span>
+                      </button>
+                    </div>
+                  </li>
+                </ul>
+              </div>
+
               <div class="flex flex-wrap items-center justify-between gap-3 border-t border-zinc-200 pt-4 dark:border-zinc-800">
                 <div class="flex flex-wrap gap-3">
                   <button
                     class="btn-danger icon-btn"
-                    :disabled="uploadingReadingList || clearingVolume || clearingUploadHistory || backfillingCovers"
+                    :disabled="uploadingReadingList || clearingVolume || clearingUploadHistory || backfillingCovers || backfillingThriftBooks"
                     @click="clearVolumeBooks"
                   >
                     <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
@@ -3134,7 +3456,7 @@ function closeMemberProfile() {
                   </button>
                   <button
                     class="btn-secondary icon-btn"
-                    :disabled="uploadingReadingList || clearingVolume || clearingUploadHistory || backfillingCovers"
+                    :disabled="uploadingReadingList || clearingVolume || clearingUploadHistory || backfillingCovers || backfillingThriftBooks"
                     @click="backfillCoverImages"
                   >
                     <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
@@ -3143,10 +3465,21 @@ function closeMemberProfile() {
                     </svg>
                     <span>{{ backfillingCovers ? "Backfilling..." : "Backfill Covers" }}</span>
                   </button>
+                  <button
+                    class="btn-secondary icon-btn"
+                    :disabled="uploadingReadingList || clearingVolume || clearingUploadHistory || backfillingCovers || backfillingThriftBooks"
+                    @click="backfillThriftBooksResources"
+                  >
+                    <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M4 6h16v12H4z"></path>
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M8 10h8M8 14h6"></path>
+                    </svg>
+                    <span>{{ backfillingThriftBooks ? "Backfilling..." : "Backfill ThriftBooks" }}</span>
+                  </button>
                 </div>
                 <button
                   class="btn-primary icon-btn"
-                  :disabled="uploadingReadingList || clearingVolume || clearingUploadHistory || backfillingCovers"
+                  :disabled="uploadingReadingList || clearingVolume || clearingUploadHistory || backfillingCovers || backfillingThriftBooks"
                   @click="uploadReadingList"
                 >
                   <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
@@ -3180,13 +3513,59 @@ function closeMemberProfile() {
               </p>
               <ul v-else class="space-y-3">
                 <li v-for="upload in uploadHistory" :key="upload.id" class="comment-row py-3">
-                  <span>{{ upload.filename }} ({{ formatUploadMode(upload.mode) }}, {{ upload.rowsImported }} {{ upload.mode === "clear" ? "deleted" : upload.mode === "backfill" ? "updated" : "rows" }})</span>
+                  <span>{{ upload.filename }} ({{ formatUploadMode(upload.mode) }}, {{ upload.rowsImported }} {{ upload.mode === "clear" ? "deleted" : upload.mode === "backfill" || upload.mode === "backfill-thriftbooks" ? "updated" : "rows" }})</span>
                   <small class="text-xs text-zinc-500 dark:text-zinc-300">
                     {{ formatDate(upload.createdAt) }}
                   </small>
                 </li>
               </ul>
             </section>
+          </section>
+
+          <section v-else-if="adminTab === 'members'" class="panel space-y-4">
+            <h4 class="text-sm font-semibold uppercase tracking-wide text-zinc-700 dark:text-zinc-300">
+              Member Roles
+            </h4>
+            <p class="text-sm text-zinc-600 dark:text-zinc-300">
+              Promote approved members to admin from here.
+            </p>
+            <p v-if="members.length === 0" class="text-sm text-zinc-600 dark:text-zinc-300">
+              No active members yet.
+            </p>
+            <ul v-else class="space-y-3">
+              <li v-for="member in members" :key="`admin-member-${member.id}`" class="comment-row py-3">
+                <div class="min-w-0">
+                  <p class="font-medium text-zinc-900 dark:text-zinc-100">{{ member.name }}</p>
+                  <p class="text-xs text-zinc-600 dark:text-zinc-300">
+                    {{ member.role }} • {{ member.commentsCount }} comment{{ member.commentsCount === 1 ? "" : "s" }}
+                  </p>
+                </div>
+                <div class="flex shrink-0 items-center gap-2">
+                  <button
+                    type="button"
+                    class="btn-secondary icon-btn px-2 py-1 text-xs"
+                    @click="openMemberProfile(member.id)"
+                  >
+                    <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M9 18l6-6-6-6" />
+                    </svg>
+                    <span>View</span>
+                  </button>
+                  <button
+                    v-if="member.role !== 'admin'"
+                    type="button"
+                    class="btn-primary icon-btn px-2 py-1 text-xs"
+                    :disabled="promotingMemberId === String(member.id)"
+                    @click="promoteMember(member)"
+                  >
+                    <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16M4 12h16" />
+                    </svg>
+                    <span>{{ promotingMemberId === String(member.id) ? "Granting..." : "Make Admin" }}</span>
+                  </button>
+                </div>
+              </li>
+            </ul>
           </section>
 
           <section v-else class="panel space-y-4">
@@ -3236,7 +3615,7 @@ function closeMemberProfile() {
             :class="
               adminMessageTone === 'error'
                 ? 'text-[#A62014] dark:text-[#A62014]'
-                : 'text-[#B59A57] dark:text-[#B59A57]'
+                : 'text-[#C8963E] dark:text-[#C8963E]'
             "
           >
             {{ adminMessage }}

@@ -51,6 +51,14 @@ npm run dev
 npm run build
 ```
 
+## Deployment
+
+See `/Users/zackkamp/Desktop/stouthearts/DEPLOYMENT.md` for:
+
+- Cloudflare Pages frontend deployment
+- Render API deployment with persistent disk
+- GitHub Actions CI + main-branch auto-deploy workflow
+
 ## Admin reading list uploads
 
 Admins can open the `Admin` page in the app and upload `.csv` or `.json` reading list files.

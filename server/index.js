@@ -33,6 +33,9 @@ const ALLOWED_ROLES = ["member", "admin"];
 const COVER_ENRICHMENT_ENABLED =
   String(process.env.COVER_ENRICHMENT_ENABLED || "true").trim().toLowerCase() !== "false";
 const COVER_LOOKUP_TIMEOUT_MS = Math.max(500, Number(process.env.COVER_LOOKUP_TIMEOUT_MS || 3000));
+const RESOURCE_LINK_LIMIT = 12;
+const FEATURED_IMAGE_FALLBACK_LIMIT = 20;
+const FEATURED_IMAGE_FALLBACKS_SETTING_KEY = "featured_image_fallback_urls";
 const DEV_MEMBER_ACCOUNT_ENABLED =
   process.env.NODE_ENV !== "production" &&
   String(process.env.DEV_MEMBER_ACCOUNT_ENABLED || "true").trim().toLowerCase() !== "false";
@@ -112,6 +115,11 @@ CREATE TABLE IF NOT EXISTS reading_list_uploads (
   rows_imported INTEGER NOT NULL,
   created_at TEXT NOT NULL,
   FOREIGN KEY(admin_user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS app_settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
 );
 `);
 
@@ -262,6 +270,19 @@ const ratingSchema = z.object({
   rating: z.number().int().min(1).max(5)
 });
 
+function normalizeHttpOrRootRelativeUrl(value) {
+  const trimmed = String(value || "").trim();
+  if (!trimmed) return undefined;
+  if (trimmed.startsWith("/")) return trimmed;
+  try {
+    const url = new URL(trimmed);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
+    return url.toString();
+  } catch {
+    return undefined;
+  }
+}
+
 const readingListModeSchema = z.enum(["append", "replace"]);
 const singleRecordSchema = z.object({
   mode: readingListModeSchema.optional().default("append"),
@@ -318,6 +339,28 @@ const bookIsbnSchema = z.object({
 const bookThumbnailSchema = z.object({
   thumbnailUrl: z.union([z.string().trim().url().max(500), z.null()]).optional()
 });
+const featuredImageFallbackSettingsSchema = z.object({
+  urls: z
+    .array(
+      z
+        .string()
+        .trim()
+        .max(500)
+        .refine((value) => Boolean(normalizeHttpOrRootRelativeUrl(value)), {
+          message: "Fallback URLs must be absolute http(s) URLs or root-relative paths."
+        })
+    )
+    .max(FEATURED_IMAGE_FALLBACK_LIMIT)
+});
+const featuredImageFallbackDeleteSchema = z.object({
+  url: z
+    .string()
+    .trim()
+    .max(500)
+    .refine((value) => Boolean(normalizeHttpOrRootRelativeUrl(value)), {
+      message: "A valid fallback image URL is required."
+    })
+});
 const updateProfileSchema = z.object({
   name: z.string().trim().min(2).max(80)
 });
@@ -341,7 +384,7 @@ const readingListRowSchema = z.object({
     .optional(),
   meetingLocation: z.string().trim().max(160).optional(),
   thumbnailUrl: z.string().trim().url().max(500).optional(),
-  resources: z.array(resourceLinkSchema).max(12).optional(),
+  resources: z.array(resourceLinkSchema).max(RESOURCE_LINK_LIMIT).optional(),
   isFeatured: z.boolean()
 });
 
@@ -471,6 +514,7 @@ function removeStoredFeaturedImageIfUnused(imageUrl) {
     db.prepare("SELECT COUNT(*) AS count FROM books WHERE featured_image_url = ?").get(imageUrl)?.count || 0
   );
   if (inUseCount > 0) return;
+  if (getFeaturedImageFallbackUrls().includes(imageUrl)) return;
 
   const fileName = imageUrl.slice(prefix.length);
   if (!fileName || fileName.includes("/") || fileName.includes("\\")) return;
@@ -807,6 +851,7 @@ function getBooksPayload(userId) {
   return {
     currentVolume: CURRENT_VOLUME,
     pastVolume: PAST_VOLUME,
+    featuredImageFallbackUrls: getFeaturedImageFallbackUrls(),
     volumes,
     currentBooks: withComments
       .filter((book) => book.volume === CURRENT_VOLUME)
@@ -1020,6 +1065,58 @@ function tableHasColumn(tableName, columnName) {
   return columns.some((column) => column.name === columnName);
 }
 
+function sanitizeFeaturedImageFallbackUrls(urls) {
+  if (!Array.isArray(urls)) return [];
+  const deduped = [];
+  const seen = new Set();
+  for (const value of urls) {
+    const normalized = normalizeHttpOrRootRelativeUrl(value);
+    if (!normalized) continue;
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+    deduped.push(normalized);
+    if (deduped.length >= FEATURED_IMAGE_FALLBACK_LIMIT) break;
+  }
+  return deduped;
+}
+
+function getFeaturedImageFallbackUrls() {
+  const row = db
+    .prepare("SELECT value FROM app_settings WHERE key = ?")
+    .get(FEATURED_IMAGE_FALLBACKS_SETTING_KEY);
+  if (!row?.value) return [];
+
+  try {
+    const parsed = JSON.parse(row.value);
+    const sanitized = sanitizeFeaturedImageFallbackUrls(parsed);
+    const normalizedValue = JSON.stringify(sanitized);
+    if (normalizedValue !== row.value) {
+      db.prepare(
+        `
+        INSERT INTO app_settings (key, value)
+        VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+      `
+      ).run(FEATURED_IMAGE_FALLBACKS_SETTING_KEY, normalizedValue);
+    }
+    return sanitized;
+  } catch {
+    return [];
+  }
+}
+
+function saveFeaturedImageFallbackUrls(urls) {
+  const sanitized = sanitizeFeaturedImageFallbackUrls(urls);
+  db.prepare(
+    `
+    INSERT INTO app_settings (key, value)
+    VALUES (?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+  `
+  ).run(FEATURED_IMAGE_FALLBACKS_SETTING_KEY, JSON.stringify(sanitized));
+  return sanitized;
+}
+
 function parseBooleanLike(value) {
   if (typeof value === "boolean") return value;
   if (typeof value === "number") return value === 1;
@@ -1071,6 +1168,46 @@ function toHttpsUrl(value) {
   } catch {
     return undefined;
   }
+}
+
+function buildThriftBooksIsbnLookupUrl(isbn) {
+  if (!isbn) return undefined;
+  return `https://www.thriftbooks.com/browse/?b.search=${encodeURIComponent(isbn)}`;
+}
+
+function mergeResourceLinks(primary, additions = []) {
+  const merged = [];
+  const seen = new Set();
+  const pushResource = (resource) => {
+    if (!resource || typeof resource !== "object") return;
+    const label = String(resource.label || "").trim();
+    const url = coerceHttpUrl(resource.url);
+    if (!label || !url) return;
+    const key = `${label.toLowerCase()}|${url.toLowerCase()}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    merged.push({ label, url });
+  };
+
+  for (const resource of primary || []) {
+    pushResource(resource);
+  }
+  for (const resource of additions) {
+    pushResource(resource);
+  }
+
+  if (merged.length === 0) return undefined;
+  return merged.slice(0, RESOURCE_LINK_LIMIT);
+}
+
+function upsertThriftBooksResource(resources, isbn) {
+  const thriftBooksUrl = buildThriftBooksIsbnLookupUrl(isbn);
+  if (!thriftBooksUrl) return resources;
+
+  const normalized = (resources || []).filter(
+    (resource) => String(resource?.label || "").trim().toLowerCase() !== "thriftbooks"
+  );
+  return mergeResourceLinks(normalized, [{ label: "ThriftBooks", url: thriftBooksUrl }]);
 }
 
 async function lookupOpenLibraryCover(isbn) {
@@ -1189,10 +1326,13 @@ async function resolveCoverForIsbn(isbn) {
 }
 
 async function enrichRowsWithCovers(rows) {
-  if (!COVER_ENRICHMENT_ENABLED) return rows;
-
   const coverCacheByIsbn = new Map();
   for (const row of rows) {
+    if (row.isbn) {
+      row.resources = upsertThriftBooksResource(row.resources, row.isbn);
+    }
+
+    if (!COVER_ENRICHMENT_ENABLED) continue;
     if (row.thumbnailUrl || !row.isbn) continue;
     if (!coverCacheByIsbn.has(row.isbn)) {
       const openLibraryCover = await lookupOpenLibraryCover(row.isbn);
@@ -1281,6 +1421,46 @@ async function backfillMissingCoversForExistingBooks() {
   };
 }
 
+function backfillThriftBooksResourcesForExistingBooks() {
+  const candidates = db
+    .prepare(
+      `
+      SELECT id, isbn, resources_json AS resourcesJson
+      FROM books
+      WHERE isbn IS NOT NULL
+        AND trim(isbn) != ''
+    `
+    )
+    .all();
+
+  const updateResourcesById = db.prepare("UPDATE books SET resources_json = ? WHERE id = ?");
+  const applyUpdates = db.transaction((rows) => {
+    let booksUpdated = 0;
+    for (const row of rows) {
+      const normalizedIsbn = normalizeIsbn(row.isbn);
+      if (!normalizedIsbn) continue;
+
+      const existingResources = parseResourcesJson(row.resourcesJson);
+      const mergedResources = upsertThriftBooksResource(existingResources, normalizedIsbn);
+      if (!mergedResources) continue;
+
+      const hasChanged =
+        JSON.stringify(existingResources) !== JSON.stringify(mergedResources);
+      if (!hasChanged) continue;
+
+      const result = updateResourcesById.run(JSON.stringify(mergedResources), row.id);
+      booksUpdated += Number(result.changes || 0);
+    }
+    return booksUpdated;
+  });
+
+  const booksUpdated = applyUpdates(candidates);
+  return {
+    candidates: candidates.length,
+    booksUpdated
+  };
+}
+
 function normalizeFieldName(value) {
   return String(value || "")
     .trim()
@@ -1348,7 +1528,8 @@ function parseResourcesFromRow(row, rowIndex) {
       label: "Barnes & Noble",
       aliases: ["barnesAndNobleUrl", "barnes_and_noble_url", "bnUrl", "bn_url"]
     },
-    { label: "IndieBound", aliases: ["indieBoundUrl", "indiebound_url", "indiebound"] }
+    { label: "IndieBound", aliases: ["indieBoundUrl", "indiebound_url", "indiebound"] },
+    { label: "ThriftBooks", aliases: ["thriftbooksUrl", "thriftbooks_url", "thriftbooks"] }
   ];
   for (const storefront of storefrontColumns) {
     pushResource(storefront.label, getRowField(row, storefront.aliases));
@@ -2128,6 +2309,150 @@ app.post(
   }
 );
 
+app.post(
+  "/api/admin/users/:userId/promote",
+  requireAuth,
+  requireRole("admin"),
+  adminLimiter,
+  (req, res) => {
+    const parsed = pendingUserIdSchema.safeParse(req.params);
+    if (!parsed.success) {
+      return res.status(400).json({ error: "Invalid user id." });
+    }
+
+    const user = db
+      .prepare("SELECT id, name, email, role, is_approved AS isApproved FROM users WHERE id = ?")
+      .get(parsed.data.userId);
+    if (!user) {
+      return res.status(404).json({ error: "User not found." });
+    }
+    if (!Boolean(user.isApproved)) {
+      return res.status(400).json({ error: "Approve this account before granting admin access." });
+    }
+
+    if (user.role !== "admin") {
+      db.prepare("UPDATE users SET role = 'admin', is_approved = 1 WHERE id = ?").run(parsed.data.userId);
+    }
+
+    return res.json({
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: "admin",
+        isApproved: true
+      }
+    });
+  }
+);
+
+app.get(
+  "/api/admin/settings/featured-image-fallbacks",
+  requireAuth,
+  requireRole("admin"),
+  adminLimiter,
+  (_req, res) => {
+    return res.json({ urls: getFeaturedImageFallbackUrls() });
+  }
+);
+
+app.put(
+  "/api/admin/settings/featured-image-fallbacks",
+  requireAuth,
+  requireRole("admin"),
+  adminLimiter,
+  (req, res) => {
+    const parsed = featuredImageFallbackSettingsSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({
+        error: parsed.error.issues[0]?.message || "Invalid fallback image URL data."
+      });
+    }
+
+    const previousUrls = getFeaturedImageFallbackUrls();
+    const urls = saveFeaturedImageFallbackUrls(parsed.data.urls);
+    const removedUrls = previousUrls.filter((url) => !urls.includes(url));
+    for (const removedUrl of removedUrls) {
+      removeStoredFeaturedImageIfUnused(removedUrl);
+    }
+    return res.json({ urls });
+  }
+);
+
+app.post(
+  "/api/admin/settings/featured-image-fallbacks/upload",
+  requireAuth,
+  requireRole("admin"),
+  adminLimiter,
+  featuredImageUpload.array("files", FEATURED_IMAGE_FALLBACK_LIMIT),
+  (req, res) => {
+    const files = Array.isArray(req.files) ? req.files : [];
+    if (files.length === 0) {
+      return res.status(400).json({ error: "Select one or more image files to upload." });
+    }
+
+    const existingUrls = getFeaturedImageFallbackUrls();
+    if (existingUrls.length + files.length > FEATURED_IMAGE_FALLBACK_LIMIT) {
+      return res.status(400).json({
+        error: `You can store up to ${FEATURED_IMAGE_FALLBACK_LIMIT} fallback images. Remove one before uploading more.`
+      });
+    }
+    if (files.some((file) => !getFeaturedImageExtension(file.mimetype))) {
+      return res.status(400).json({ error: "Fallback images must be JPG, PNG, WEBP, or GIF." });
+    }
+
+    const stagedUploads = [];
+    try {
+      for (const file of files) {
+        const extension = getFeaturedImageExtension(file.mimetype);
+        const fileName = `fallback-${req.userId}-${randomUUID()}.${extension}`;
+        const filePath = path.join(FEATURED_IMAGES_DIR, fileName);
+        writeFileSync(filePath, file.buffer);
+        stagedUploads.push(`/api/uploads/featured-images/${fileName}`);
+      }
+
+      const urls = saveFeaturedImageFallbackUrls([...existingUrls, ...stagedUploads]);
+      return res.status(201).json({ urls, uploaded: stagedUploads.length });
+    } catch {
+      for (const stagedUrl of stagedUploads) {
+        removeStoredFeaturedImageIfUnused(stagedUrl);
+      }
+      return res.status(500).json({ error: "Failed to upload fallback image(s)." });
+    }
+  }
+);
+
+app.delete(
+  "/api/admin/settings/featured-image-fallbacks",
+  requireAuth,
+  requireRole("admin"),
+  adminLimiter,
+  (req, res) => {
+    const parsed = featuredImageFallbackDeleteSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({
+        error: parsed.error.issues[0]?.message || "A valid fallback image URL is required."
+      });
+    }
+
+    const normalizedUrl = normalizeHttpOrRootRelativeUrl(parsed.data.url);
+    if (!normalizedUrl) {
+      return res.status(400).json({ error: "A valid fallback image URL is required." });
+    }
+
+    const existingUrls = getFeaturedImageFallbackUrls();
+    if (!existingUrls.includes(normalizedUrl)) {
+      return res.status(404).json({ error: "Fallback image not found." });
+    }
+
+    const urls = saveFeaturedImageFallbackUrls(
+      existingUrls.filter((existingUrl) => existingUrl !== normalizedUrl)
+    );
+    removeStoredFeaturedImageIfUnused(normalizedUrl);
+    return res.json({ urls });
+  }
+);
+
 app.get("/api/books", requireAuth, (req, res) => {
   const payload = getBooksPayload(req.userId);
   res.json(payload);
@@ -2550,7 +2875,7 @@ app.post(
   requireAuth,
   requireRole("admin"),
   adminLimiter,
-  (req, res) => {
+  async (req, res) => {
     const parsed = singleRecordSchema.safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({ error: parsed.error.issues[0]?.message || "Invalid record data." });
@@ -2571,7 +2896,8 @@ app.post(
       isFeatured: false
     };
 
-    const summary = applyReadingListToAllUsers([row], parsed.data.mode);
+    const [enrichedRow] = await enrichRowsWithCovers([row]);
+    const summary = applyReadingListToAllUsers([enrichedRow], parsed.data.mode);
     db.prepare(
       `
       INSERT INTO reading_list_uploads (id, admin_user_id, filename, mode, rows_imported, created_at)
@@ -2761,6 +3087,34 @@ app.post(
       return res.json({ summary });
     } catch {
       return res.status(500).json({ error: "Failed to backfill covers." });
+    }
+  }
+);
+
+app.post(
+  "/api/admin/reading-list/backfill-thriftbooks",
+  requireAuth,
+  requireRole("admin"),
+  adminLimiter,
+  (req, res) => {
+    try {
+      const summary = backfillThriftBooksResourcesForExistingBooks();
+      db.prepare(
+        `
+        INSERT INTO reading_list_uploads (id, admin_user_id, filename, mode, rows_imported, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `
+      ).run(
+        randomUUID(),
+        req.userId,
+        "backfill-thriftbooks",
+        "backfill-thriftbooks",
+        summary.booksUpdated,
+        new Date().toISOString()
+      );
+      return res.json({ summary });
+    } catch {
+      return res.status(500).json({ error: "Failed to backfill ThriftBooks resources." });
     }
   }
 );

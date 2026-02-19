@@ -8,7 +8,7 @@
   }
 
   body {
-    @apply m-0 bg-[#F2EFDF] text-[#23260F] dark:bg-[#141806] dark:text-[#F2EFDF];
+    @apply m-0 bg-[#F2EFDF] text-[#23260F] dark:bg-[#0F1115] dark:text-[#E6E8ED];
     font-family: "Avenir Next", "Segoe UI", sans-serif;
   }
 
@@ -31,59 +31,59 @@
   }
 
   .flatpickr-calendar {
-    @apply border-[#B59A57] bg-[#F2EFDF] text-[#23260F] shadow-lg dark:border-[#3B4013] dark:bg-[#1A200B] dark:text-[#F2EFDF];
+    @apply border-[#D2CCBF] bg-[#F2EFDF] text-[#23260F] shadow-lg dark:border-[#313947] dark:bg-[#151A22] dark:text-[#E6E8ED];
   }
 
   .flatpickr-day {
-    @apply text-[#23260F] dark:text-[#F2EFDF];
+    @apply text-[#23260F] dark:text-[#E6E8ED];
   }
 
   .flatpickr-day:hover {
-    @apply bg-[#B59A57]/20 dark:bg-[#3B4013]/60;
+    @apply bg-[#E9E2D3] dark:bg-[#242C37];
   }
 
   .flatpickr-day.today {
-    @apply border-[#B59A57] dark:border-[#B59A57];
+    @apply border-[#C8963E] dark:border-[#C8963E];
   }
 
   .flatpickr-day.selected,
   .flatpickr-day.selected:hover {
-    @apply border-[#B59A57] bg-[#B59A57] text-[#F2EFDF] dark:border-[#B59A57] dark:bg-[#B59A57] dark:text-[#23260F];
+    @apply border-[#C8963E] bg-[#C8963E] text-[#F2EFDF] dark:border-[#C8963E] dark:bg-[#C8963E] dark:text-[#23260F];
   }
 
   .flatpickr-months .flatpickr-month,
   .flatpickr-current-month .flatpickr-monthDropdown-months,
   .flatpickr-current-month input.cur-year {
-    @apply text-[#23260F] dark:text-[#F2EFDF];
+    @apply text-[#23260F] dark:text-[#E6E8ED];
   }
 
   .panel {
-    @apply rounded-2xl border border-[#B59A57]/40 bg-[#F7F4E8] p-4 shadow-sm dark:border-[#3B4013] dark:bg-[#1C230D];
+    @apply rounded-2xl border border-[#D8D2C3] bg-[#FFFFFF] p-4 shadow-sm dark:border-[#313947] dark:bg-[#171B22];
   }
 
   .card {
-    @apply rounded-xl border border-[#B59A57]/35 bg-[#FBF9F0] p-3 dark:border-[#3B4013] dark:bg-[#212912];
+    @apply rounded-xl border border-[#E3DDCF] bg-[#FCFAF4] p-3 dark:border-[#3A4252] dark:bg-[#1D222B];
   }
 
   .input {
-    @apply w-full rounded-md border border-[#B59A57] bg-white px-3 py-2 text-sm text-[#23260F] outline-none transition;
-    @apply focus:border-[#B59A57] focus:ring-2 focus:ring-[#B59A57]/30;
-    @apply dark:border-[#3B4013] dark:bg-[#1A200B] dark:text-[#F2EFDF] dark:focus:border-[#B59A57];
+    @apply w-full rounded-md border border-[#CFC7B5] bg-white px-3 py-2 text-sm text-[#23260F] outline-none transition;
+    @apply focus:border-[#C8963E] focus:ring-2 focus:ring-[#C8963E]/30;
+    @apply dark:border-[#3A4252] dark:bg-[#151A22] dark:text-[#E6E8ED] dark:focus:border-[#C8963E];
   }
 
   .field-label {
-    @apply block text-sm font-medium text-[#3B4013] dark:text-[#B59A57];
+    @apply block text-sm font-medium text-[#4A4F5A] dark:text-[#C9CED8];
   }
 
   .btn-primary {
-    @apply rounded-md bg-[#B59A57] px-3 py-2 text-sm font-medium text-[#23260F] transition;
-    @apply hover:bg-[#9B8348] disabled:cursor-not-allowed disabled:opacity-60;
-    @apply dark:bg-[#B59A57] dark:text-[#23260F] dark:hover:bg-[#C3AC73] dark:hover:text-[#23260F];
+    @apply rounded-md bg-[#C8963E] px-3 py-2 text-sm font-medium text-[#23260F] transition;
+    @apply hover:bg-[#B17F2D] disabled:cursor-not-allowed disabled:opacity-60;
+    @apply dark:bg-[#C8963E] dark:text-[#23260F] dark:hover:bg-[#DAB66A] dark:hover:text-[#23260F];
   }
 
   .btn-secondary {
-    @apply rounded-md border border-[#B59A57] bg-[#F2EFDF] px-3 py-2 text-sm font-medium text-[#23260F] transition;
-    @apply hover:bg-[#E7E4D6] dark:border-[#3B4013] dark:bg-[#1A200B] dark:text-[#F2EFDF] dark:hover:bg-[#20280F];
+    @apply rounded-md border border-[#CFC7B5] bg-[#F8F5EC] px-3 py-2 text-sm font-medium text-[#23260F] transition;
+    @apply hover:bg-[#ECE7DB] dark:border-[#3A4252] dark:bg-[#151A22] dark:text-[#E6E8ED] dark:hover:bg-[#1D232D];
   }
 
   .btn-danger {
@@ -93,29 +93,29 @@
   }
 
   .btn-tab {
-    @apply rounded-full border border-[#B59A57] bg-[#F2EFDF] px-4 py-2 text-sm font-medium text-[#23260F] transition;
-    @apply hover:bg-[#E7E4D6] dark:border-[#3B4013] dark:bg-[#1A200B] dark:text-[#F2EFDF] dark:hover:bg-[#20280F];
+    @apply rounded-full border border-[#CFC7B5] bg-[#F8F5EC] px-4 py-2 text-sm font-medium text-[#23260F] transition;
+    @apply hover:bg-[#ECE7DB] dark:border-[#3A4252] dark:bg-[#151A22] dark:text-[#E6E8ED] dark:hover:bg-[#1D232D];
   }
 
   .btn-tab-active {
-    @apply border-[#B59A57] bg-[#B59A57] text-[#23260F] hover:bg-[#9B8348] dark:border-[#B59A57] dark:bg-[#B59A57] dark:text-[#23260F] dark:hover:bg-[#C3AC73] dark:hover:text-[#23260F];
+    @apply border-[#C8963E] bg-[#C8963E] text-[#23260F] hover:bg-[#B17F2D] dark:border-[#C8963E] dark:bg-[#C8963E] dark:text-[#23260F] dark:hover:bg-[#DAB66A] dark:hover:text-[#23260F];
   }
 
   .comment-row {
-    @apply flex items-start justify-between gap-2 rounded-md border border-[#B59A57]/35 bg-[#FCFAF2] px-3 py-2 text-sm;
-    @apply dark:border-[#3B4013] dark:bg-[#1F2710];
+    @apply flex items-start justify-between gap-2 rounded-md border border-[#E0DACB] bg-[#FFFFFF] px-3 py-2 text-sm;
+    @apply dark:border-[#3A4252] dark:bg-[#1E2530];
   }
 
   .brand-title-shadow {
     text-shadow:
-      0 4px 3px rgba(181, 154, 87, 0.75),
-      0 8px 13px rgba(181, 154, 87, 0.28);
+      0 4px 3px rgba(200, 150, 62, 0.72),
+      0 8px 13px rgba(200, 150, 62, 0.24);
   }
 
   .dark .brand-title-shadow {
     text-shadow:
-      0 4px 3px rgba(181, 154, 87, 0.75),
-      0 8px 13px rgba(181, 154, 87, 0.28);
+      0 4px 3px rgba(200, 150, 62, 0.72),
+      0 8px 13px rgba(200, 150, 62, 0.24);
   }
 
   [data-feature-star-animate="true"] {
