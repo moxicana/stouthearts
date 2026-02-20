@@ -502,6 +502,25 @@ function getFeaturedImageExtension(mimeType) {
   return null;
 }
 
+function detectImageExtensionFromBuffer(buffer) {
+  if (!buffer || buffer.length < 12) return null;
+  const hasBytes = (offset, values) =>
+    values.every((value, index) => Number(buffer[offset + index]) === value);
+
+  if (hasBytes(0, [0xff, 0xd8, 0xff])) return "jpg";
+  if (hasBytes(0, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return "png";
+  if (hasBytes(0, [0x47, 0x49, 0x46, 0x38]) && (buffer[4] === 0x37 || buffer[4] === 0x39) && buffer[5] === 0x61)
+    return "gif";
+  if (hasBytes(0, [0x52, 0x49, 0x46, 0x46]) && hasBytes(8, [0x57, 0x45, 0x42, 0x50])) return "webp";
+  return null;
+}
+
+function resolveImageExtension(file, fallbackFromMimeType) {
+  const fromContent = detectImageExtensionFromBuffer(file?.buffer);
+  if (fromContent) return fromContent;
+  return fallbackFromMimeType(file?.mimetype || "");
+}
+
 function removeStoredProfileImage(imageUrl) {
   if (!imageUrl || typeof imageUrl !== "string") return;
   const prefix = "/api/uploads/profile-images/";
@@ -2416,14 +2435,16 @@ app.post(
         error: `You can store up to ${FEATURED_IMAGE_FALLBACK_LIMIT} fallback images. Remove one before uploading more.`
       });
     }
-    if (files.some((file) => !getFeaturedImageExtension(file.mimetype))) {
-      return res.status(400).json({ error: "Fallback images must be JPG, PNG, WEBP, or GIF." });
+    const fileExtensions = files.map((file) => resolveImageExtension(file, getFeaturedImageExtension));
+    if (fileExtensions.some((extension) => !extension)) {
+      return res.status(400).json({ error: "Fallback images must be valid JPG, PNG, WEBP, or GIF files." });
     }
 
     const stagedUploads = [];
     try {
-      for (const file of files) {
-        const extension = getFeaturedImageExtension(file.mimetype);
+      for (let index = 0; index < files.length; index += 1) {
+        const file = files[index];
+        const extension = fileExtensions[index];
         const fileName = `fallback-${req.userId}-${randomUUID()}.${extension}`;
         const filePath = path.join(FEATURED_IMAGES_DIR, fileName);
         writeFileSync(filePath, file.buffer);
@@ -2622,9 +2643,9 @@ app.post(
       return res.status(400).json({ error: "Select an image file to upload." });
     }
 
-    const extension = getProfileImageExtension(req.file.mimetype);
+    const extension = resolveImageExtension(req.file, getProfileImageExtension);
     if (!extension) {
-      return res.status(400).json({ error: "Profile image must be JPG, PNG, WEBP, or GIF." });
+      return res.status(400).json({ error: "Profile image must be a valid JPG, PNG, WEBP, or GIF file." });
     }
 
     const previous = db
@@ -2950,9 +2971,9 @@ app.post(
       return res.status(400).json({ error: "Select an image file to upload." });
     }
 
-    const extension = getFeaturedImageExtension(req.file.mimetype);
+    const extension = resolveImageExtension(req.file, getFeaturedImageExtension);
     if (!extension) {
-      return res.status(400).json({ error: "Featured image must be JPG, PNG, WEBP, or GIF." });
+      return res.status(400).json({ error: "Featured image must be a valid JPG, PNG, WEBP, or GIF file." });
     }
 
     const fileName = `featured-${req.userId}-${randomUUID()}.${extension}`;
