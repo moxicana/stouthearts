@@ -33,6 +33,14 @@ const ALLOWED_ROLES = ["member", "admin"];
 const COVER_ENRICHMENT_ENABLED =
   String(process.env.COVER_ENRICHMENT_ENABLED || "true").trim().toLowerCase() !== "false";
 const COVER_LOOKUP_TIMEOUT_MS = Math.max(500, Number(process.env.COVER_LOOKUP_TIMEOUT_MS || 3000));
+const ADMIN_RATE_LIMIT_WINDOW_MS = Math.max(
+  60 * 1000,
+  Number(process.env.ADMIN_RATE_LIMIT_WINDOW_MS || 15 * 60 * 1000)
+);
+const ADMIN_RATE_LIMIT_MAX = Math.max(
+  30,
+  Number(process.env.ADMIN_RATE_LIMIT_MAX || (process.env.NODE_ENV === "production" ? 200 : 1000))
+);
 const RESOURCE_LINK_LIMIT = 12;
 const FEATURED_IMAGE_FALLBACK_LIMIT = 20;
 const FEATURED_IMAGE_FALLBACKS_SETTING_KEY = "featured_image_fallback_urls";
@@ -237,8 +245,9 @@ const authLimiter = rateLimit({
 });
 
 const adminLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: process.env.NODE_ENV === "production" ? 30 : 200,
+  windowMs: ADMIN_RATE_LIMIT_WINDOW_MS,
+  max: ADMIN_RATE_LIMIT_MAX,
+  skip: (req) => req.method === "OPTIONS",
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: "Too many admin requests. Please try again later." }

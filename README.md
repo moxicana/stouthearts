@@ -127,6 +127,11 @@ Cover enrichment settings (`.env`):
 - `COVER_ENRICHMENT_ENABLED=true`
 - `COVER_LOOKUP_TIMEOUT_MS=3000`
 
+Admin rate-limit settings (`.env`):
+
+- `ADMIN_RATE_LIMIT_WINDOW_MS=900000` (15 minutes)
+- `ADMIN_RATE_LIMIT_MAX=200`
+
 ## Security notes
 
 - For production, run behind HTTPS and keep `NODE_ENV=production`.
