@@ -211,7 +211,12 @@ db.exec("CREATE INDEX IF NOT EXISTS idx_books_user_volume ON books(user_id, volu
 db.exec("CREATE INDEX IF NOT EXISTS idx_books_meeting_starts_at ON books(meeting_starts_at)");
 
 app.disable("x-powered-by");
-app.use(helmet());
+app.use(
+  helmet({
+    // Allow the frontend on a different subdomain to embed uploaded images.
+    crossOriginResourcePolicy: { policy: "cross-origin" }
+  })
+);
 app.use(
   cors({
     origin(origin, callback) {
