@@ -33,6 +33,10 @@ const ALLOWED_ROLES = ["member", "admin"];
 const COVER_ENRICHMENT_ENABLED =
   String(process.env.COVER_ENRICHMENT_ENABLED || "true").trim().toLowerCase() !== "false";
 const COVER_LOOKUP_TIMEOUT_MS = Math.max(500, Number(process.env.COVER_LOOKUP_TIMEOUT_MS || 3000));
+const FEATURED_IMAGE_MAX_BYTES = Math.max(
+  512 * 1024,
+  Number(process.env.FEATURED_IMAGE_MAX_BYTES || 5 * 1024 * 1024)
+);
 const ADMIN_RATE_LIMIT_WINDOW_MS = Math.max(
   60 * 1000,
   Number(process.env.ADMIN_RATE_LIMIT_WINDOW_MS || 15 * 60 * 1000)
@@ -233,7 +237,7 @@ const profileImageUpload = multer({
 });
 const featuredImageUpload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 2 * 1024 * 1024 }
+  limits: { fileSize: FEATURED_IMAGE_MAX_BYTES }
 });
 
 const authLimiter = rateLimit({
@@ -1166,6 +1170,12 @@ function coerceHttpUrl(value) {
   if (/^https?:\/\//i.test(trimmed)) return trimmed;
   if (/^[a-z0-9.-]+\.[a-z]{2,}(\/|$)/i.test(trimmed)) return `https://${trimmed}`;
   return trimmed;
+}
+
+function humanizeMegabytes(bytes) {
+  const mb = bytes / (1024 * 1024);
+  const rounded = mb >= 10 ? Math.round(mb) : Math.round(mb * 10) / 10;
+  return `${rounded}MB`;
 }
 
 function toHttpsUrl(value) {
@@ -3167,7 +3177,12 @@ app.post(
 
 app.use((error, _req, res, _next) => {
   if (error?.name === "MulterError" && error?.code === "LIMIT_FILE_SIZE") {
-    return res.status(400).json({ error: "Uploaded file is too large. Maximum size is 2MB." });
+    return res.status(400).json({
+      error: `Uploaded file is too large. Maximum size is ${humanizeMegabytes(FEATURED_IMAGE_MAX_BYTES)}.`
+    });
+  }
+  if (error?.name === "MulterError" && error?.code === "LIMIT_UNEXPECTED_FILE") {
+    return res.status(400).json({ error: "Unexpected upload field. Please retry using the upload button." });
   }
   if (String(error.message).includes("CORS")) {
     return res.status(403).json({ error: "CORS blocked for this origin." });

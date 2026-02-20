@@ -126,6 +126,7 @@ Cover enrichment settings (`.env`):
 
 - `COVER_ENRICHMENT_ENABLED=true`
 - `COVER_LOOKUP_TIMEOUT_MS=3000`
+- `FEATURED_IMAGE_MAX_BYTES=5242880` (5MB max for featured/fallback image uploads)
 
 Admin rate-limit settings (`.env`):
 
