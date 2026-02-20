@@ -6,6 +6,13 @@ import { useRoute, useRouter } from "vue-router";
 
 const THEME_KEY = "bookclub.theme.v1";
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || "/api").replace(/\/$/, "");
+const API_ORIGIN = (() => {
+  try {
+    return new URL(API_BASE).origin;
+  } catch {
+    return "";
+  }
+})();
 const DEV_QUICK_LOGIN_ENABLED =
   import.meta.env.DEV &&
   String(import.meta.env.VITE_DEV_QUICK_LOGIN_ENABLED || "true").trim().toLowerCase() !== "false";
@@ -460,6 +467,15 @@ function normalizeFeaturedImageFallbackUrls(value) {
   return deduped;
 }
 
+function resolveApiAssetUrl(value) {
+  const trimmed = String(value || "").trim();
+  if (!trimmed) return "";
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  if (!trimmed.startsWith("/")) return trimmed;
+  if (!API_ORIGIN) return trimmed;
+  return `${API_ORIGIN}${trimmed}`;
+}
+
 function getFeaturedImageFallbackForBook(book) {
   const urls = featuredImageFallbackUrls.value;
   if (!book || urls.length === 0) return null;
@@ -473,7 +489,7 @@ function getFeaturedImageFallbackForBook(book) {
 
 function resolveFeaturedImageUrl(book) {
   if (!book) return null;
-  return book.featuredImageUrl || getFeaturedImageFallbackForBook(book);
+  return resolveApiAssetUrl(book.featuredImageUrl || getFeaturedImageFallbackForBook(book));
 }
 
 function toDateTimeLocal(value) {
@@ -1782,7 +1798,7 @@ function closeMemberProfile() {
               <span class="flex h-7 w-7 items-center justify-center overflow-hidden rounded-full border border-zinc-200 bg-zinc-100 text-xs font-semibold text-zinc-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200">
                 <img
                   v-if="user.profileImageUrl"
-                  :src="user.profileImageUrl"
+                  :src="resolveApiAssetUrl(user.profileImageUrl)"
                   :alt="`${user.name} profile image`"
                   class="h-full w-full object-cover"
                 />
@@ -2081,7 +2097,7 @@ function closeMemberProfile() {
                   </button>
                   <img
                     v-if="selectedBook.thumbnailUrl"
-                    :src="selectedBook.thumbnailUrl"
+                    :src="resolveApiAssetUrl(selectedBook.thumbnailUrl)"
                     :alt="`Cover of ${selectedBook.title}`"
                     class="h-full w-full object-contain"
                   />
@@ -2614,7 +2630,7 @@ function closeMemberProfile() {
               <div class="flex h-20 w-20 shrink-0 items-center justify-center overflow-hidden rounded-full border border-zinc-200 bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800">
                 <img
                   v-if="memberProfile.profileImageUrl"
-                  :src="memberProfile.profileImageUrl"
+                  :src="resolveApiAssetUrl(memberProfile.profileImageUrl)"
                   :alt="`${memberProfile.name} profile image`"
                   class="h-full w-full object-cover"
                 />
@@ -2941,7 +2957,7 @@ function closeMemberProfile() {
                     <div class="h-28 w-20 shrink-0 overflow-hidden rounded-md border border-zinc-200 bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800">
                       <img
                         v-if="book.thumbnailUrl"
-                        :src="book.thumbnailUrl"
+                        :src="resolveApiAssetUrl(book.thumbnailUrl)"
                         :alt="`Cover of ${book.title}`"
                         class="h-full w-full object-cover"
                       />
@@ -2996,7 +3012,7 @@ function closeMemberProfile() {
                       <div class="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-full border border-zinc-200 bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800">
                         <img
                           v-if="member.profileImageUrl"
-                          :src="member.profileImageUrl"
+                          :src="resolveApiAssetUrl(member.profileImageUrl)"
                           :alt="`${member.name} profile image`"
                           class="h-full w-full object-cover"
                         />
@@ -3423,7 +3439,7 @@ function closeMemberProfile() {
                     class="comment-row flex-col items-stretch gap-2"
                   >
                     <div class="aspect-[16/9] overflow-hidden rounded-md border border-zinc-200 bg-zinc-100 dark:border-zinc-700 dark:bg-[#151A22]">
-                      <img :src="url" alt="Fallback image preview" class="h-full w-full object-cover" />
+                      <img :src="resolveApiAssetUrl(url)" alt="Fallback image preview" class="h-full w-full object-cover" />
                     </div>
                     <div class="flex items-center justify-end">
                       <button
