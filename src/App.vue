@@ -1862,7 +1862,7 @@ function closeMemberProfile() {
               @click="goHome"
             >
               <h1 class="brand-title-shadow text-4xl font-bold tracking-tight">Stout Hearts</h1>
-              <p class="mt-1 text-zinc-600 dark:text-zinc-300">Book club tracker</p>
+              <p class="mt-1 italic text-zinc-600 dark:text-zinc-300">"A friend is useful, far or near; the nearer the better"</p>
             </button>
             <nav v-if="user" class="flex flex-wrap items-center gap-2">
               <div ref="volumeMenuRef" class="relative">
