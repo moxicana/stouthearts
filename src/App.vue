@@ -3,6 +3,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch, watchEffect } f
 import FlatPickr from "vue-flatpickr-component";
 import "flatpickr/dist/flatpickr.min.css";
 import { useRoute, useRouter } from "vue-router";
+import BookCommentThread from "./components/BookCommentThread.vue";
 
 const THEME_KEY = "bookclub.theme.v1";
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || "/api").replace(/\/$/, "");
@@ -34,7 +35,6 @@ const headerOffset = ref(0);
 
 const loading = ref(true);
 const submittingAuth = ref(false);
-const busyBookId = ref("");
 const completingBookId = ref("");
 const ratingBookId = ref("");
 const featuringBookId = ref("");
@@ -58,7 +58,7 @@ const isDark = ref(loadTheme());
 const user = ref(null);
 const authMode = ref("login");
 const activeView = ref("volume");
-const adminSettingsExpanded = ref(false);
+const adminDrawerOpen = ref(false);
 const adminTab = ref("single");
 
 const authForm = ref({
@@ -74,6 +74,9 @@ const volumes = ref([]);
 const selectedVolume = ref(null);
 const showVolumeMenu = ref(false);
 const commentDrafts = ref({});
+const replyDrafts = ref({});
+const activeReplyCommentId = ref("");
+const commentActionId = ref("");
 const uploadHistory = ref([]);
 const featuredImageFallbackUrls = ref([]);
 const featuredFallbackDropActive = ref(false);
@@ -177,6 +180,7 @@ const selectedBook = computed(() => {
   }
   return null;
 });
+const selectedBookThreadedComments = computed(() => buildThreadedComments(selectedBook.value?.comments || []));
 const selectedBookFeaturedImageUrl = computed(() => resolveFeaturedImageUrl(selectedBook.value));
 const selectedBookCompletionStats = computed(() => {
   const participants = Math.max(Number(selectedBook.value?.participantsCount || 0), 0);
@@ -271,6 +275,9 @@ watch(isAdmin, (value) => {
   if (!value && activeView.value === "admin") {
     activeView.value = "volume";
   }
+  if (!value) {
+    adminDrawerOpen.value = false;
+  }
   if (value) {
     startPendingUsersPolling();
     loadPendingUsers().catch(() => {});
@@ -286,6 +293,12 @@ watch(activeView, (value) => {
   }
 });
 
+watch(routeBookId, (value) => {
+  if (!value) {
+    adminDrawerOpen.value = false;
+  }
+});
+
 watch(selectedBook, (value) => {
   if (value && selectedVolume.value !== value.volume) {
     selectedVolume.value = value.volume;
@@ -298,6 +311,7 @@ watch(selectedBook, (value) => {
     featuredImageMessage.value = "";
     resetMeetingForm(value);
     meetingMessage.value = "";
+    activeReplyCommentId.value = "";
   }
 });
 
@@ -427,6 +441,49 @@ function getHostname(value) {
   } catch {
     return "";
   }
+}
+
+function toTimestamp(value) {
+  const time = new Date(value || "").getTime();
+  return Number.isNaN(time) ? 0 : time;
+}
+
+function buildThreadedComments(comments) {
+  if (!Array.isArray(comments) || comments.length === 0) return [];
+
+  const nodesById = new Map();
+  for (const comment of comments) {
+    nodesById.set(comment.id, {
+      id: comment.id,
+      text: comment.text || "",
+      authorName: comment.authorName || "Unknown",
+      authorUserId: Number(comment.authorUserId || 0),
+      parentCommentId: comment.parentCommentId || null,
+      createdAt: comment.createdAt || null,
+      likesCount: Number(comment.likesCount || 0),
+      isLikedByUser: Boolean(comment.isLikedByUser),
+      replies: []
+    });
+  }
+
+  const roots = [];
+  for (const node of nodesById.values()) {
+    const parent = node.parentCommentId ? nodesById.get(node.parentCommentId) : null;
+    if (parent) {
+      parent.replies.push(node);
+    } else {
+      roots.push(node);
+    }
+  }
+
+  const sortTree = (items) => {
+    items.sort((left, right) => toTimestamp(left.createdAt) - toTimestamp(right.createdAt));
+    for (const item of items) {
+      if (item.replies.length > 0) sortTree(item.replies);
+    }
+  };
+  sortTree(roots);
+  return roots;
 }
 
 function getInitials(name) {
@@ -1076,6 +1133,10 @@ async function logout() {
     volumes.value = [];
     selectedVolume.value = null;
     showVolumeMenu.value = false;
+    commentDrafts.value = {};
+    replyDrafts.value = {};
+    activeReplyCommentId.value = "";
+    commentActionId.value = "";
     uploadHistory.value = [];
     featuredImageFallbackUrls.value = [];
     featuredFallbackDropActive.value = false;
@@ -1112,24 +1173,87 @@ async function logout() {
   }
 }
 
-async function addComment(bookId) {
-  const text = (commentDrafts.value[bookId] || "").trim();
+function canDeleteComment(comment) {
+  if (!comment || !user.value) return false;
+  return user.value.role === "admin" || Number(comment.authorUserId) === Number(user.value.id);
+}
+
+function toggleReplyComposer(commentId) {
+  if (!commentId) return;
+  activeReplyCommentId.value = activeReplyCommentId.value === commentId ? "" : commentId;
+}
+
+function setReplyDraft(commentId, value) {
+  if (!commentId) return;
+  replyDrafts.value[commentId] = value;
+}
+
+async function addComment(bookId, options = {}) {
+  const parentCommentId = options.parentCommentId || null;
+  const draftSource = parentCommentId ? replyDrafts.value[parentCommentId] : commentDrafts.value[bookId];
+  const text = (draftSource || "").trim();
   if (!text) return;
 
-  busyBookId.value = bookId;
+  commentActionId.value = parentCommentId ? `reply:${parentCommentId}` : `comment:${bookId}`;
   resetAuthError();
   try {
     await api(`/books/${bookId}/comments`, {
       method: "POST",
-      body: JSON.stringify({ text })
+      body: JSON.stringify({ text, parentCommentId })
     });
-    commentDrafts.value[bookId] = "";
+    if (parentCommentId) {
+      replyDrafts.value[parentCommentId] = "";
+      activeReplyCommentId.value = "";
+    } else {
+      commentDrafts.value[bookId] = "";
+    }
     await loadBooks();
     await loadDashboard();
   } catch (error) {
     errorMessage.value = error.message;
   } finally {
-    busyBookId.value = "";
+    commentActionId.value = "";
+  }
+}
+
+async function deleteComment(bookId, comment) {
+  if (!bookId || !comment?.id || !canDeleteComment(comment)) return;
+  const confirmation = window.confirm("Delete this comment and any replies?");
+  if (!confirmation) return;
+
+  commentActionId.value = `delete:${comment.id}`;
+  resetAuthError();
+  try {
+    await api(`/books/${encodeURIComponent(bookId)}/comments/${encodeURIComponent(comment.id)}`, {
+      method: "DELETE"
+    });
+    replyDrafts.value = {};
+    if (activeReplyCommentId.value === comment.id) {
+      activeReplyCommentId.value = "";
+    }
+    await loadBooks();
+    await loadDashboard();
+  } catch (error) {
+    errorMessage.value = error.message;
+  } finally {
+    commentActionId.value = "";
+  }
+}
+
+async function toggleCommentLike(bookId, comment) {
+  if (!bookId || !comment?.id) return;
+  commentActionId.value = `like:${comment.id}`;
+  resetAuthError();
+  try {
+    await api(`/books/${encodeURIComponent(bookId)}/comments/${encodeURIComponent(comment.id)}/like`, {
+      method: "PUT",
+      body: JSON.stringify({ liked: !comment.isLikedByUser })
+    });
+    await loadBooks();
+  } catch (error) {
+    errorMessage.value = error.message;
+  } finally {
+    commentActionId.value = "";
   }
 }
 
@@ -1699,6 +1823,9 @@ function openBookDetails(bookId) {
 }
 
 function closeBookDetails() {
+  adminDrawerOpen.value = false;
+  activeReplyCommentId.value = "";
+  replyDrafts.value = {};
   router.push("/");
 }
 
@@ -1978,7 +2105,7 @@ function closeMemberProfile() {
                 </svg>
                 <span>Back to Volume</span>
               </button>
-              <div class="flex items-center gap-3">
+              <div class="flex items-center gap-2 sm:gap-3">
                 <p class="text-sm text-zinc-600 dark:text-zinc-300">Volume {{ selectedBook.volume }}</p>
                 <p
                   v-if="selectedBook.isFeatured"
@@ -1986,6 +2113,23 @@ function closeMemberProfile() {
                 >
                   Featured for Volume
                 </p>
+                <button
+                  v-if="isAdmin"
+                  type="button"
+                  class="btn-secondary icon-btn px-3 py-1 text-xs"
+                  :aria-expanded="adminDrawerOpen ? 'true' : 'false'"
+                  @click="adminDrawerOpen = true"
+                >
+                  <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 15.2a3.2 3.2 0 1 0 0-6.4 3.2 3.2 0 0 0 0 6.4Z" />
+                    <path
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      d="M19.4 15a1.8 1.8 0 0 0 .36 2l.07.08a2.2 2.2 0 1 1-3.1 3.1l-.09-.07a1.8 1.8 0 0 0-2-.36 1.8 1.8 0 0 0-1.09 1.65V22a2.2 2.2 0 0 1-4.4 0v-.11a1.8 1.8 0 0 0-1.08-1.65 1.8 1.8 0 0 0-2 .36l-.1.07a2.2 2.2 0 1 1-3.1-3.1l.08-.08a1.8 1.8 0 0 0 .36-2 1.8 1.8 0 0 0-1.65-1.09H2.2a2.2 2.2 0 1 1 0-4.4h.12a1.8 1.8 0 0 0 1.65-1.08 1.8 1.8 0 0 0-.36-2l-.08-.1a2.2 2.2 0 1 1 3.1-3.1l.1.08a1.8 1.8 0 0 0 2 .36H8.8a1.8 1.8 0 0 0 1.09-1.65V2.2a2.2 2.2 0 1 1 4.4 0v.12a1.8 1.8 0 0 0 1.08 1.65 1.8 1.8 0 0 0 2-.36l.09-.08a2.2 2.2 0 1 1 3.1 3.1l-.07.1a1.8 1.8 0 0 0-.36 2v.04a1.8 1.8 0 0 0 1.64 1.07h.12a2.2 2.2 0 1 1 0 4.4h-.12a1.8 1.8 0 0 0-1.64 1.08V15Z"
+                    />
+                  </svg>
+                  <span>Admin Settings</span>
+                </button>
               </div>
             </div>
 
@@ -2318,38 +2462,40 @@ function closeMemberProfile() {
               </article>
             </div>
 
-            <section v-if="isAdmin" class="space-y-3 rounded-xl border border-zinc-200 p-4 dark:border-zinc-700">
-              <div class="flex items-center justify-between gap-2">
-                <h3 class="text-lg font-semibold">Admin Settings</h3>
+            <Teleport to="body">
+              <div v-if="isAdmin && adminDrawerOpen" class="fixed inset-0 z-50">
                 <button
                   type="button"
-                  class="btn-secondary icon-btn px-3 py-1 text-xs"
-                  :aria-expanded="adminSettingsExpanded ? 'true' : 'false'"
-                  @click="adminSettingsExpanded = !adminSettingsExpanded"
+                  class="absolute inset-0 bg-black/50"
+                  aria-label="Close admin settings drawer"
+                  @click="adminDrawerOpen = false"
+                ></button>
+                <aside
+                  class="absolute right-0 top-0 h-full w-full max-w-2xl overflow-y-auto border-l border-zinc-200 bg-[#F2EFDF] shadow-2xl dark:border-[#313947] dark:bg-[#0F1115]"
+                  role="dialog"
+                  aria-modal="true"
+                  aria-label="Book admin settings"
                 >
-                  <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
-                    <path
-                      v-if="adminSettingsExpanded"
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                      d="m18 15-6-6-6 6"
-                    />
-                    <path
-                      v-else
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                      d="m6 9 6 6 6-6"
-                    />
-                  </svg>
-                  <span>{{ adminSettingsExpanded ? "Collapse" : "Expand" }}</span>
-                </button>
-              </div>
-              <p class="text-xs text-zinc-500 dark:text-zinc-300">
-                Changes here apply to this logical book across all member records for this volume.
-              </p>
+                  <div class="sticky top-0 z-10 border-b border-zinc-200 bg-[#F2EFDF]/95 px-4 py-4 backdrop-blur dark:border-[#313947] dark:bg-[#0F1115]/95 sm:px-6">
+                    <div class="flex items-start justify-between gap-4">
+                      <div>
+                        <h3 class="text-lg font-semibold">Admin Settings</h3>
+                        <p class="mt-1 text-xs text-zinc-600 dark:text-zinc-300">
+                          Changes here apply to this logical book across all member records for this volume.
+                        </p>
+                      </div>
+                      <button type="button" class="btn-secondary icon-btn px-2 py-1 text-xs" @click="adminDrawerOpen = false">
+                        <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                          <path stroke-linecap="round" stroke-linejoin="round" d="M18 6 6 18M6 6l12 12" />
+                        </svg>
+                        <span>Close</span>
+                      </button>
+                    </div>
+                  </div>
 
-              <div v-if="adminSettingsExpanded" class="grid gap-3 lg:grid-cols-2">
-              <form class="card space-y-2" @submit.prevent="saveBookIsbn">
+                  <div class="p-4 sm:p-6">
+                    <div class="grid gap-3">
+                      <form class="card space-y-2" @submit.prevent="saveBookIsbn">
                 <p class="text-sm font-semibold">ISBN</p>
                 <label class="field-label">
                   ISBN-10 or ISBN-13
@@ -2394,9 +2540,9 @@ function closeMemberProfile() {
                     {{ savingBookIsbn ? "Clearing..." : "Clear ISBN" }}
                   </button>
                 </div>
-              </form>
+                      </form>
 
-              <form class="card space-y-2" @submit.prevent="saveBookCover">
+                      <form class="card space-y-2" @submit.prevent="saveBookCover">
                 <p class="text-sm font-semibold">Cover Image URL</p>
                 <label class="field-label">
                   URL
@@ -2440,9 +2586,9 @@ function closeMemberProfile() {
                     {{ savingBookCover ? "Clearing..." : "Clear Cover" }}
                   </button>
                 </div>
-              </form>
+                      </form>
 
-              <div class="card space-y-2">
+                      <div class="card space-y-2">
                 <p class="text-sm font-semibold">Featured Header Image</p>
                 <p class="text-xs text-zinc-600 dark:text-zinc-300">
                   Use the upload icon in the top-right corner of the header image to replace it.
@@ -2455,9 +2601,9 @@ function closeMemberProfile() {
                 >
                   {{ uploadingBookFeaturedImage ? "Working..." : "Clear Featured Image" }}
                 </button>
-              </div>
+                      </div>
 
-              <form class="card space-y-2" @submit.prevent="saveBookMeeting">
+                      <form class="card space-y-2" @submit.prevent="saveBookMeeting">
                 <p class="text-sm font-semibold">Meeting</p>
                 <label class="field-label">
                   Meeting Date
@@ -2518,9 +2664,9 @@ function closeMemberProfile() {
                     {{ clearingBookMeeting ? "Clearing..." : "Clear" }}
                   </button>
                 </div>
-              </form>
+                      </form>
 
-              <div class="card space-y-2 lg:col-span-2">
+                      <div class="card space-y-2">
                 <p class="text-sm font-semibold">Delete Record</p>
                 <p class="text-xs text-zinc-600 dark:text-zinc-300">
                   Permanently removes this book record for all members in this volume, including related comments, completion, and ratings.
@@ -2536,9 +2682,12 @@ function closeMemberProfile() {
                   </svg>
                   <span>{{ deletingBookRecord ? "Deleting..." : "Delete Record" }}</span>
                 </button>
+                      </div>
+                    </div>
+                  </div>
+                </aside>
               </div>
-              </div>
-            </section>
+            </Teleport>
 
             <div class="space-y-2">
               <h3 class="text-lg font-semibold">Resources</h3>
@@ -2562,19 +2711,24 @@ function closeMemberProfile() {
 
             <div class="space-y-2">
               <h3 class="text-lg font-semibold">Comments</h3>
-              <p v-if="selectedBook.comments.length === 0" class="text-sm text-zinc-600 dark:text-zinc-300">
+              <p v-if="selectedBookThreadedComments.length === 0" class="text-sm text-zinc-600 dark:text-zinc-300">
                 No comments yet.
               </p>
-              <ul v-else class="space-y-2">
-                <li v-for="comment in selectedBook.comments" :key="comment.id" class="comment-row">
-                  <div class="min-w-0">
-                    <p>{{ comment.text }}</p>
-                    <small class="text-xs text-zinc-500 dark:text-zinc-300">
-                      by {{ comment.authorName || "Unknown" }} on {{ formatDate(comment.createdAt) }} at {{ formatCommentTime(comment.createdAt) }}
-                    </small>
-                  </div>
-                </li>
-              </ul>
+              <BookCommentThread
+                v-else
+                :comments="selectedBookThreadedComments"
+                :active-reply-comment-id="activeReplyCommentId"
+                :reply-drafts="replyDrafts"
+                :comment-action-id="commentActionId"
+                :can-delete-comment="canDeleteComment"
+                :format-date="formatDate"
+                :format-comment-time="formatCommentTime"
+                @toggle-reply="toggleReplyComposer"
+                @set-reply-draft="setReplyDraft"
+                @submit-reply="addComment(selectedBook.id, { parentCommentId: $event })"
+                @toggle-like="toggleCommentLike(selectedBook.id, $event)"
+                @delete-comment="deleteComment(selectedBook.id, $event)"
+              />
               <div class="flex gap-2">
                 <input
                   v-model="commentDrafts[selectedBook.id]"
@@ -2584,13 +2738,13 @@ function closeMemberProfile() {
                 />
                 <button
                   class="btn-primary icon-btn"
-                  :disabled="busyBookId === selectedBook.id"
+                  :disabled="commentActionId === `comment:${selectedBook.id}`"
                   @click="addComment(selectedBook.id)"
                 >
                   <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
                     <path stroke-linecap="round" stroke-linejoin="round" d="M12 5v14M5 12h14" />
                   </svg>
-                  <span>Add</span>
+                  <span>{{ commentActionId === `comment:${selectedBook.id}` ? "Adding..." : "Add" }}</span>
                 </button>
               </div>
             </div>
@@ -2891,12 +3045,6 @@ function closeMemberProfile() {
                     <p class="min-w-0 text-sm text-zinc-600 dark:text-zinc-300">
                       {{ featuredBook.month }} {{ featuredBook.year }} in Volume {{ selectedVolumeLabel ?? currentVolume }}
                     </p>
-                    <p class="inline-flex shrink-0 items-center gap-1 text-sm font-medium text-[#C8963E] dark:text-[#C8963E]">
-                      <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M9 18l6-6-6-6" />
-                      </svg>
-                      <span>Open details</span>
-                    </p>
                   </div>
                 </div>
               </div>
@@ -2981,12 +3129,6 @@ function closeMemberProfile() {
                       </p>
                       <p class="mt-2 text-xs text-zinc-500 dark:text-zinc-300">
                         {{ book.comments.length }} comment{{ book.comments.length === 1 ? "" : "s" }}
-                      </p>
-                      <p class="mt-2 inline-flex items-center gap-1 text-sm font-medium text-[#C8963E] dark:text-[#C8963E]">
-                        <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
-                          <path stroke-linecap="round" stroke-linejoin="round" d="M9 18l6-6-6-6" />
-                        </svg>
-                        <span>Open details</span>
                       </p>
                     </div>
                   </div>

@@ -111,10 +111,21 @@ CREATE TABLE IF NOT EXISTS comments (
   id TEXT PRIMARY KEY,
   user_id INTEGER NOT NULL,
   book_id TEXT NOT NULL,
+  parent_comment_id TEXT,
   text TEXT NOT NULL,
   created_at TEXT NOT NULL,
   FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
-  FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE
+  FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE,
+  FOREIGN KEY(parent_comment_id) REFERENCES comments(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS comment_likes (
+  user_id INTEGER NOT NULL,
+  comment_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (user_id, comment_id),
+  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY(comment_id) REFERENCES comments(id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_books_user_year ON books(user_id, year);
@@ -166,6 +177,7 @@ ensureColumnExists(
 ensureColumnExists("books", "completed_at", "ALTER TABLE books ADD COLUMN completed_at TEXT");
 ensureColumnExists("books", "rating", "ALTER TABLE books ADD COLUMN rating INTEGER");
 ensureColumnExists("books", "rated_at", "ALTER TABLE books ADD COLUMN rated_at TEXT");
+ensureColumnExists("comments", "parent_comment_id", "ALTER TABLE comments ADD COLUMN parent_comment_id TEXT");
 db.prepare(
   "UPDATE users SET role = 'member' WHERE role NOT IN ('member', 'admin') OR role IS NULL"
 ).run();
@@ -205,10 +217,25 @@ db.prepare(
   WHERE volume IS NULL OR volume < 1
 `
 ).run(BASE_LEGACY_YEAR, BASE_LEGACY_YEAR);
+db.prepare(
+  `
+  UPDATE comments
+  SET parent_comment_id = NULL
+  WHERE parent_comment_id IS NOT NULL
+    AND NOT EXISTS (
+      SELECT 1
+      FROM comments parent
+      WHERE parent.id = comments.parent_comment_id
+    )
+`
+).run();
 db.exec("CREATE INDEX IF NOT EXISTS idx_users_role ON users(role)");
 db.exec("CREATE INDEX IF NOT EXISTS idx_users_approval ON users(is_approved)");
 db.exec("CREATE INDEX IF NOT EXISTS idx_books_user_volume ON books(user_id, volume)");
 db.exec("CREATE INDEX IF NOT EXISTS idx_books_meeting_starts_at ON books(meeting_starts_at)");
+db.exec("CREATE INDEX IF NOT EXISTS idx_comments_parent ON comments(parent_comment_id)");
+db.exec("CREATE INDEX IF NOT EXISTS idx_comment_likes_comment ON comment_likes(comment_id)");
+db.exec("CREATE INDEX IF NOT EXISTS idx_comment_likes_user ON comment_likes(user_id)");
 
 app.disable("x-powered-by");
 app.use(
@@ -279,7 +306,15 @@ const loginSchema = z.object({
 });
 
 const commentSchema = z.object({
-  text: z.string().trim().min(1).max(400)
+  text: z.string().trim().min(1).max(400),
+  parentCommentId: z.union([z.string().trim().min(1).max(120), z.null()]).optional()
+});
+const commentParamsSchema = z.object({
+  bookId: z.string().trim().min(1).max(120),
+  commentId: z.string().trim().min(1).max(120)
+});
+const commentLikeSchema = z.object({
+  liked: z.boolean()
 });
 const completionSchema = z.object({
   completed: z.boolean()
@@ -524,6 +559,28 @@ function resolveImageExtension(file, fallbackFromMimeType) {
   const fromContent = detectImageExtensionFromBuffer(file?.buffer);
   if (fromContent) return fromContent;
   return fallbackFromMimeType(file?.mimetype || "");
+}
+
+function normalizeBookIdentityPart(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function getBookIdentity(volume, title, author) {
+  return `${Number(volume)}::${normalizeBookIdentityPart(title)}::${normalizeBookIdentityPart(author)}`;
+}
+
+function hasSameBookIdentity(left, right) {
+  return getBookIdentity(left?.volume, left?.title, left?.author) === getBookIdentity(right?.volume, right?.title, right?.author);
+}
+
+function getCommentLikeSummary(commentId, userId) {
+  const likesCount = Number(
+    db.prepare("SELECT COUNT(*) AS count FROM comment_likes WHERE comment_id = ?").get(commentId)?.count || 0
+  );
+  const liked = Boolean(
+    db.prepare("SELECT 1 FROM comment_likes WHERE comment_id = ? AND user_id = ?").get(commentId, userId)
+  );
+  return { likesCount, isLikedByUser: liked };
 }
 
 function removeStoredProfileImage(imageUrl) {
@@ -818,26 +875,77 @@ function getBooksPayload(userId) {
     )
     .all(userId);
 
+  const bookIdsByIdentity = books.reduce((acc, book) => {
+    const identity = getBookIdentity(book.volume, book.title, book.author);
+    if (!acc[identity]) acc[identity] = [];
+    acc[identity].push(book.id);
+    return acc;
+  }, {});
+  const visibleIdentities = new Set(Object.keys(bookIdsByIdentity));
+
   const comments = db
     .prepare(
       `
-      SELECT c.id, c.book_id AS bookId, c.text, c.created_at AS createdAt, u.name AS authorName
+      SELECT
+        c.id,
+        c.book_id AS bookId,
+        c.text,
+        c.created_at AS createdAt,
+        c.parent_comment_id AS parentCommentId,
+        c.user_id AS authorUserId,
+        u.name AS authorName,
+        b.volume,
+        b.title,
+        b.author
       FROM comments c
+      INNER JOIN books b ON b.id = c.book_id
       INNER JOIN users u ON u.id = c.user_id
-      WHERE c.user_id = ?
-      ORDER BY c.created_at DESC
+      WHERE u.is_approved = 1
+      ORDER BY c.created_at ASC
     `
     )
-    .all(userId);
+    .all()
+    .filter((comment) => visibleIdentities.has(getBookIdentity(comment.volume, comment.title, comment.author)));
+
+  const visibleCommentIds = new Set(comments.map((comment) => comment.id));
+  const likeCountsByCommentId = new Map(
+    db
+      .prepare(
+        `
+        SELECT comment_id AS commentId, COUNT(*) AS likesCount
+        FROM comment_likes
+        GROUP BY comment_id
+      `
+      )
+      .all()
+      .map((row) => [row.commentId, Number(row.likesCount || 0)])
+  );
+  const likedByUser = new Set(
+    db
+      .prepare("SELECT comment_id AS commentId FROM comment_likes WHERE user_id = ?")
+      .all(userId)
+      .map((row) => row.commentId)
+  );
 
   const commentsByBookId = comments.reduce((acc, comment) => {
-    if (!acc[comment.bookId]) acc[comment.bookId] = [];
-    acc[comment.bookId].push({
+    const identity = getBookIdentity(comment.volume, comment.title, comment.author);
+    const targetBookIds = bookIdsByIdentity[identity] || [];
+    const normalizedComment = {
       id: comment.id,
       text: comment.text,
       authorName: comment.authorName,
-      createdAt: comment.createdAt
-    });
+      authorUserId: Number(comment.authorUserId),
+      parentCommentId:
+        comment.parentCommentId && visibleCommentIds.has(comment.parentCommentId) ? comment.parentCommentId : null,
+      createdAt: comment.createdAt,
+      likesCount: Number(likeCountsByCommentId.get(comment.id) || 0),
+      isLikedByUser: likedByUser.has(comment.id)
+    };
+
+    for (const targetBookId of targetBookIds) {
+      if (!acc[targetBookId]) acc[targetBookId] = [];
+      acc[targetBookId].push(normalizedComment);
+    }
     return acc;
   }, {});
 
@@ -1329,6 +1437,42 @@ function getPublishedMonthName(publishedDate) {
   ][monthIndex - 1];
 }
 
+function getPublishedYearLoose(value) {
+  const match = String(value || "").match(/\b(19|20)\d{2}\b/);
+  if (!match) return undefined;
+  const year = Number(match[0]);
+  if (!Number.isInteger(year) || year < 1900 || year > 2100) return undefined;
+  return year;
+}
+
+function getPublishedMonthNameLoose(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return undefined;
+  const monthNames = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December"
+  ];
+  const lower = raw.toLowerCase();
+  for (const month of monthNames) {
+    if (lower.includes(month.toLowerCase())) return month;
+  }
+  const parsed = new Date(raw);
+  if (!Number.isNaN(parsed.getTime())) {
+    return monthNames[parsed.getMonth()];
+  }
+  return undefined;
+}
+
 async function lookupGoogleBooksByIsbn(isbn) {
   const endpoint = `https://www.googleapis.com/books/v1/volumes?q=isbn:${encodeURIComponent(
     isbn
@@ -1360,6 +1504,49 @@ async function lookupGoogleBooksByIsbn(isbn) {
   } catch {
     return null;
   }
+}
+
+async function lookupOpenLibraryBookByIsbn(isbn) {
+  const endpoint = `https://openlibrary.org/api/books?bibkeys=ISBN:${encodeURIComponent(
+    isbn
+  )}&format=json&jscmd=data`;
+  try {
+    const response = await fetch(endpoint, { signal: AbortSignal.timeout(COVER_LOOKUP_TIMEOUT_MS) });
+    if (!response.ok) return null;
+    const payload = await response.json();
+    const entry = payload?.[`ISBN:${isbn}`];
+    if (!entry) return null;
+    const coverCandidate = entry?.cover?.large || entry?.cover?.medium || entry?.cover?.small;
+    return {
+      title: String(entry?.title || "").trim() || undefined,
+      author: String(entry?.authors?.[0]?.name || "").trim() || undefined,
+      year: getPublishedYearLoose(entry?.publish_date),
+      month: getPublishedMonthNameLoose(entry?.publish_date),
+      thumbnailUrl: toHttpsUrl(coverCandidate),
+      isbn
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function lookupBookByIsbn(isbn) {
+  const google = await lookupGoogleBooksByIsbn(isbn);
+  if (google) {
+    if (!google.thumbnailUrl) {
+      const openLibraryCover = await lookupOpenLibraryCover(isbn);
+      if (openLibraryCover) google.thumbnailUrl = openLibraryCover;
+    }
+    return google;
+  }
+
+  const openLibrary = await lookupOpenLibraryBookByIsbn(isbn);
+  if (!openLibrary) return null;
+  if (!openLibrary.thumbnailUrl) {
+    const openLibraryCover = await lookupOpenLibraryCover(isbn);
+    if (openLibraryCover) openLibrary.thumbnailUrl = openLibraryCover;
+  }
+  return openLibrary;
 }
 
 async function resolveCoverForIsbn(isbn) {
@@ -2695,35 +2882,170 @@ app.delete("/api/users/me/profile-image", requireAuth, authLimiter, (req, res) =
 });
 
 app.post("/api/books/:bookId/comments", requireAuth, (req, res) => {
-  const { bookId } = req.params;
+  const parsedParams = featureBookParamsSchema.safeParse(req.params);
+  if (!parsedParams.success) {
+    return res.status(400).json({ error: "Invalid book id." });
+  }
+  const { bookId } = parsedParams.data;
   const parsed = commentSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: "Comment cannot be empty." });
   }
 
-  const exists = db
+  const userBook = db
     .prepare("SELECT id FROM books WHERE id = ? AND user_id = ?")
     .get(bookId, req.userId);
 
-  if (!exists) {
+  if (!userBook) {
     return res.status(404).json({ error: "Book not found." });
+  }
+
+  const rootBook = db
+    .prepare("SELECT id, volume, title, author FROM books WHERE id = ?")
+    .get(bookId);
+  if (!rootBook) {
+    return res.status(404).json({ error: "Book not found." });
+  }
+
+  let parentCommentId = parsed.data.parentCommentId || null;
+  if (parentCommentId) {
+    const parent = db
+      .prepare(
+        `
+        SELECT c.id, b.volume, b.title, b.author
+        FROM comments c
+        INNER JOIN books b ON b.id = c.book_id
+        WHERE c.id = ?
+      `
+      )
+      .get(parentCommentId);
+    if (!parent || !hasSameBookIdentity(parent, rootBook)) {
+      return res.status(400).json({ error: "Reply target not found for this book." });
+    }
   }
 
   const id = randomUUID();
   const createdAt = new Date().toISOString();
   const author = db.prepare("SELECT name FROM users WHERE id = ?").get(req.userId);
+  const authorUserId = Number(req.userId);
   db.prepare(
-    "INSERT INTO comments (id, user_id, book_id, text, created_at) VALUES (?, ?, ?, ?, ?)"
-  ).run(id, req.userId, bookId, parsed.data.text, createdAt);
+    "INSERT INTO comments (id, user_id, book_id, parent_comment_id, text, created_at) VALUES (?, ?, ?, ?, ?, ?)"
+  ).run(id, req.userId, bookId, parentCommentId, parsed.data.text, createdAt);
 
   return res.status(201).json({
     comment: {
       id,
       text: parsed.data.text,
       authorName: author?.name || "Unknown",
-      createdAt
+      authorUserId,
+      parentCommentId,
+      createdAt,
+      likesCount: 0,
+      isLikedByUser: false
     }
   });
+});
+
+app.delete("/api/books/:bookId/comments/:commentId", requireAuth, (req, res) => {
+  const parsedParams = commentParamsSchema.safeParse(req.params);
+  if (!parsedParams.success) {
+    return res.status(400).json({ error: "Invalid comment id." });
+  }
+  const { bookId, commentId } = parsedParams.data;
+
+  const rootBook = db
+    .prepare("SELECT id, volume, title, author FROM books WHERE id = ? AND user_id = ?")
+    .get(bookId, req.userId);
+  if (!rootBook) {
+    return res.status(404).json({ error: "Book not found." });
+  }
+
+  const comment = db
+    .prepare(
+      `
+      SELECT c.id, c.user_id AS authorUserId, b.volume, b.title, b.author
+      FROM comments c
+      INNER JOIN books b ON b.id = c.book_id
+      WHERE c.id = ?
+    `
+    )
+    .get(commentId);
+  if (!comment || !hasSameBookIdentity(comment, rootBook)) {
+    return res.status(404).json({ error: "Comment not found." });
+  }
+
+  const actor = db.prepare("SELECT id, role FROM users WHERE id = ?").get(req.userId);
+  if (!actor) {
+    clearSessionCookie(res);
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  const isAdmin = actor.role === "admin";
+  if (!isAdmin && Number(comment.authorUserId) !== Number(req.userId)) {
+    return res.status(403).json({ error: "You can only delete your own comments." });
+  }
+
+  db.prepare(
+    `
+    WITH RECURSIVE descendants(id) AS (
+      SELECT id FROM comments WHERE id = ?
+      UNION ALL
+      SELECT c.id
+      FROM comments c
+      INNER JOIN descendants d ON c.parent_comment_id = d.id
+    )
+    DELETE FROM comments
+    WHERE id IN (SELECT id FROM descendants)
+  `
+  ).run(commentId);
+
+  return res.status(204).end();
+});
+
+app.put("/api/books/:bookId/comments/:commentId/like", requireAuth, (req, res) => {
+  const parsedParams = commentParamsSchema.safeParse(req.params);
+  if (!parsedParams.success) {
+    return res.status(400).json({ error: "Invalid comment id." });
+  }
+  const parsedBody = commentLikeSchema.safeParse(req.body);
+  if (!parsedBody.success) {
+    return res.status(400).json({ error: "Invalid like state." });
+  }
+
+  const { bookId, commentId } = parsedParams.data;
+  const rootBook = db
+    .prepare("SELECT id, volume, title, author FROM books WHERE id = ? AND user_id = ?")
+    .get(bookId, req.userId);
+  if (!rootBook) {
+    return res.status(404).json({ error: "Book not found." });
+  }
+
+  const comment = db
+    .prepare(
+      `
+      SELECT c.id, b.volume, b.title, b.author
+      FROM comments c
+      INNER JOIN books b ON b.id = c.book_id
+      WHERE c.id = ?
+    `
+    )
+    .get(commentId);
+  if (!comment || !hasSameBookIdentity(comment, rootBook)) {
+    return res.status(404).json({ error: "Comment not found." });
+  }
+
+  if (parsedBody.data.liked) {
+    db.prepare(
+      `
+      INSERT INTO comment_likes (user_id, comment_id, created_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(user_id, comment_id) DO NOTHING
+    `
+    ).run(req.userId, commentId, new Date().toISOString());
+  } else {
+    db.prepare("DELETE FROM comment_likes WHERE user_id = ? AND comment_id = ?").run(req.userId, commentId);
+  }
+
+  return res.json({ commentId, ...getCommentLikeSummary(commentId, req.userId) });
 });
 
 app.post(
@@ -2906,7 +3228,7 @@ app.post(
       return res.status(400).json({ error: "ISBN must be a valid ISBN-10 or ISBN-13." });
     }
 
-    const book = await lookupGoogleBooksByIsbn(normalizedIsbn);
+    const book = await lookupBookByIsbn(normalizedIsbn);
     if (!book) {
       return res.status(404).json({ error: "No matching book found for that ISBN." });
     }
@@ -3218,11 +3540,19 @@ app.use((error, _req, res, _next) => {
 
 async function startServer() {
   await ensureDevMemberAccount();
-  app.listen(PORT, () => {
+  const server = app.listen(PORT, () => {
     console.log(`API listening on http://127.0.0.1:${PORT}`);
     if (DEV_MEMBER_ACCOUNT_ENABLED) {
       console.log(`Dev member account ready: ${DEV_MEMBER_EMAIL}`);
     }
+  });
+  server.on("error", (error) => {
+    if (error?.code === "EADDRINUSE") {
+      console.error(`Port ${PORT} is already in use. Stop the existing process or change PORT.`);
+      process.exit(1);
+    }
+    console.error("Server failed to start:", error);
+    process.exit(1);
   });
 }
 
