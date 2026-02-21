@@ -68,7 +68,7 @@ function forwardSetReplyDraft(...args) {
               class="btn-secondary icon-btn px-2 py-1 text-xs"
               @click="emit('toggle-reply', comment.id)"
             >
-              <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+              <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
                 <path stroke-linecap="round" stroke-linejoin="round" d="M10 14 4 20M4 20v-6m0 6h6" />
                 <path stroke-linecap="round" stroke-linejoin="round" d="M20 5H9a5 5 0 0 0-5 5v4" />
               </svg>
@@ -92,7 +92,7 @@ function forwardSetReplyDraft(...args) {
               @click="emit('toggle-like', comment)"
             >
               <svg
-                class="ui-icon-sm"
+                class="ui-icon"
                 viewBox="0 0 24 24"
                 :fill="comment.likesCount > 0 ? 'currentColor' : 'none'"
                 stroke="currentColor"
@@ -124,7 +124,7 @@ function forwardSetReplyDraft(...args) {
               :disabled="props.commentActionId === `delete:${comment.id}`"
               @click="emit('delete-comment', comment)"
             >
-              <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+              <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
                 <path stroke-linecap="round" stroke-linejoin="round" d="M4 7h16M9 7V5h6v2M8 7l1 12h6l1-12"></path>
               </svg>
               <span>{{ props.commentActionId === `delete:${comment.id}` ? "Deleting..." : "Delete" }}</span>
@@ -145,7 +145,7 @@ function forwardSetReplyDraft(...args) {
             :disabled="props.commentActionId === `reply:${comment.id}`"
             @click="emit('submit-reply', comment.id)"
           >
-            <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+            <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
               <path stroke-linecap="round" stroke-linejoin="round" d="M12 5v14M5 12h14" />
             </svg>
             <span>{{ props.commentActionId === `reply:${comment.id}` ? "Adding..." : "Reply" }}</span>

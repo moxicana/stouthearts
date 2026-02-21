@@ -2250,7 +2250,7 @@ function closeMemberProfile() {
                     v-if="selectedBook.thumbnailUrl"
                     :src="resolveApiAssetUrl(selectedBook.thumbnailUrl)"
                     :alt="`Cover of ${selectedBook.title}`"
-                    class="h-full w-full object-contain"
+                    class="h-full w-full object-cover"
                   />
                   <div
                     v-else
@@ -2763,7 +2763,7 @@ function closeMemberProfile() {
                   :disabled="commentActionId === `comment:${selectedBook.id}`"
                   @click="addComment(selectedBook.id)"
                 >
-                  <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                  <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
                     <path stroke-linecap="round" stroke-linejoin="round" d="M12 5v14M5 12h14" />
                   </svg>
                   <span>{{ commentActionId === `comment:${selectedBook.id}` ? "Adding..." : "Add" }}</span>
