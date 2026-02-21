@@ -425,6 +425,13 @@ function formatEventTime(value) {
   });
 }
 
+function isUpcomingMeeting(value) {
+  if (!value) return false;
+  const timestamp = new Date(value).getTime();
+  if (Number.isNaN(timestamp)) return false;
+  return timestamp > Date.now();
+}
+
 function formatCommentTime(value) {
   if (!value) return "";
   return new Date(value).toLocaleTimeString([], {
@@ -2401,24 +2408,39 @@ function closeMemberProfile() {
                 </div>
               </article>
 
-              <article class="card space-y-3">
-                <div class="flex items-center gap-2">
-                  <svg
-                    class="h-4 w-4 text-[#C8963E] dark:text-[#C8963E]"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="1.8"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    aria-hidden="true"
+              <article
+                class="card space-y-3"
+                :class="
+                  isUpcomingMeeting(selectedBook.meetingStartsAt)
+                    ? 'border-[#C8963E]/60 bg-[#FFF8E8] dark:border-[#C8963E]/60 dark:bg-[#2A2417]'
+                    : ''
+                "
+              >
+                <div class="flex items-center justify-between gap-2">
+                  <div class="flex items-center gap-2">
+                    <svg
+                      class="h-4 w-4 text-[#C8963E] dark:text-[#C8963E]"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.8"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      aria-hidden="true"
+                    >
+                      <rect x="3" y="4" width="18" height="18" rx="2"></rect>
+                      <path d="M16 2v4"></path>
+                      <path d="M8 2v4"></path>
+                      <path d="M3 10h18"></path>
+                    </svg>
+                    <h3 class="text-xl font-semibold">Meeting</h3>
+                  </div>
+                  <span
+                    v-if="isUpcomingMeeting(selectedBook.meetingStartsAt)"
+                    class="rounded-full bg-[#C8963E] px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide text-[#23260F]"
                   >
-                    <rect x="3" y="4" width="18" height="18" rx="2"></rect>
-                    <path d="M16 2v4"></path>
-                    <path d="M8 2v4"></path>
-                    <path d="M3 10h18"></path>
-                  </svg>
-                  <h3 class="text-xl font-semibold">Meeting</h3>
+                    Upcoming
+                  </span>
                 </div>
                 <div v-if="selectedBook.meetingStartsAt" class="space-y-2">
                   <p class="text-base font-semibold text-zinc-900 dark:text-zinc-100">
@@ -3072,9 +3094,22 @@ function closeMemberProfile() {
                   <button
                     type="button"
                     class="card w-full text-left transition hover:-translate-y-0.5 hover:border-[#C8963E] dark:hover:border-[#C8963E]"
+                    :class="
+                      isUpcomingMeeting(book.meetingStartsAt)
+                        ? 'border-[#C8963E]/60 bg-[#FFF8E8] dark:border-[#C8963E]/60 dark:bg-[#2A2417]'
+                        : ''
+                    "
                     @click="openBookDetails(book.id)"
                   >
-                    <p class="font-semibold">{{ book.title }}</p>
+                    <div class="flex items-center justify-between gap-2">
+                      <p class="font-semibold">{{ book.title }}</p>
+                      <span
+                        v-if="isUpcomingMeeting(book.meetingStartsAt)"
+                        class="rounded-full bg-[#C8963E] px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-[#23260F]"
+                      >
+                        Upcoming
+                      </span>
+                    </div>
                     <p class="text-sm text-zinc-600 dark:text-zinc-300">{{ book.author }}</p>
                     <p class="mt-1 text-xs text-zinc-600 dark:text-zinc-300">
                       {{ formatEventDate(book.meetingStartsAt) }} at {{ formatEventTime(book.meetingStartsAt) }}

@@ -1361,6 +1361,12 @@ function upsertThriftBooksResource(resources, isbn) {
   return mergeResourceLinks(normalized, [{ label: "ThriftBooks", url: thriftBooksUrl }]);
 }
 
+function removeThriftBooksResource(resources) {
+  return (resources || []).filter(
+    (resource) => String(resource?.label || "").trim().toLowerCase() !== "thriftbooks"
+  );
+}
+
 async function lookupOpenLibraryCover(isbn) {
   const probeUrl = `https://covers.openlibrary.org/b/isbn/${isbn}-L.jpg?default=false`;
   try {
@@ -2160,6 +2166,16 @@ async function updateIsbnForBookForAllUsers(requestUserId, referenceBookId, isbn
   }
   const nextIsbn = normalizedIsbn || null;
   const resolvedCover = nextIsbn ? await resolveCoverForIsbn(nextIsbn) : null;
+  const thriftBooksUrl = nextIsbn ? buildThriftBooksIsbnLookupUrl(nextIsbn) : null;
+
+  const selectMatchingBookResources = db.prepare(
+    `
+      SELECT id, resources_json AS resourcesJson
+      FROM books
+      WHERE volume = ? AND lower(title) = lower(?) AND lower(author) = lower(?)
+    `
+  );
+  const updateResourcesById = db.prepare("UPDATE books SET resources_json = ? WHERE id = ?");
 
   const applyTransaction = db.transaction(() => {
     const usersAffected = db.prepare("SELECT COUNT(*) AS count FROM users").get().count;
@@ -2173,6 +2189,7 @@ async function updateIsbnForBookForAllUsers(requestUserId, referenceBookId, isbn
       )
       .run(nextIsbn, referenceBook.volume, referenceBook.title, referenceBook.author).changes;
     let coversUpdated = 0;
+    let resourcesUpdated = 0;
     if (nextIsbn && COVER_ENRICHMENT_ENABLED) {
       coversUpdated = db
         .prepare(
@@ -2185,14 +2202,31 @@ async function updateIsbnForBookForAllUsers(requestUserId, referenceBookId, isbn
         .run(resolvedCover, referenceBook.volume, referenceBook.title, referenceBook.author).changes;
     }
 
+    const matchingBooks = selectMatchingBookResources.all(
+      referenceBook.volume,
+      referenceBook.title,
+      referenceBook.author
+    );
+    for (const book of matchingBooks) {
+      const existingResources = parseResourcesJson(book.resourcesJson);
+      const nextResources = nextIsbn
+        ? upsertThriftBooksResource(existingResources, nextIsbn) || []
+        : removeThriftBooksResource(existingResources);
+      if (JSON.stringify(existingResources) === JSON.stringify(nextResources)) continue;
+      const result = updateResourcesById.run(JSON.stringify(nextResources), book.id);
+      resourcesUpdated += Number(result.changes || 0);
+    }
+
     return {
       usersAffected,
       booksUpdated,
       coversUpdated,
+      resourcesUpdated,
       volume: referenceBook.volume,
       title: referenceBook.title,
       author: referenceBook.author,
       isbn: nextIsbn,
+      thriftBooksUrl,
       coverUrl: resolvedCover,
       coverResolved: Boolean(resolvedCover),
       coverSyncAttempted: Boolean(nextIsbn && COVER_ENRICHMENT_ENABLED)
