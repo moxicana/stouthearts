@@ -1159,7 +1159,8 @@ async function logout() {
       discussions: 0,
       upcomingEvents: 0,
       currentVolumeBooks: 0
-    };
+    }; 
+    
     members.value = [];
     memberProfile.value = null;
     memberRecentComments.value = [];
