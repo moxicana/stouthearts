@@ -26,6 +26,10 @@
     @apply h-4 w-4 shrink-0;
   }
 
+  .ui-icon-lg {
+    @apply h-5 w-5 shrink-0;
+  }
+
   .ui-icon-sm {
     @apply h-3.5 w-3.5 shrink-0;
   }
@@ -102,7 +106,8 @@
   }
 
   .comment-row {
-    @apply flex items-start justify-between gap-2 rounded-md border border-[#E0DACB] bg-[#FFFFFF] px-3 py-2 text-sm;
+    @apply flex flex-col items-stretch gap-2 rounded-md border border-[#E0DACB] bg-[#FFFFFF] px-3 py-2 text-sm;
+    @apply sm:flex-row sm:items-start sm:justify-between;
     @apply dark:border-[#3A4252] dark:bg-[#1E2530];
   }
 

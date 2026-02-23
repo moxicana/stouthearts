@@ -674,7 +674,7 @@ async function ensureDevMemberAccount() {
 
   const hasBooks = db.prepare("SELECT COUNT(*) AS count FROM books WHERE user_id = ?").get(userId).count > 0;
   if (!hasBooks) {
-    seedBooksForUser(userId);
+    initializeBooksForUser(userId);
   }
 }
 
@@ -793,6 +793,148 @@ function seedBooksForUser(userId) {
   });
 
   insertSeedData();
+}
+
+function getCatalogSourceUserId(targetUserId) {
+  const source = db
+    .prepare(
+      `
+      SELECT u.id, u.role, COUNT(b.id) AS booksCount
+      FROM users u
+      INNER JOIN books b ON b.user_id = u.id
+      WHERE u.id != ? AND u.is_approved = 1
+      GROUP BY u.id, u.role
+      ORDER BY
+        CASE WHEN u.role = 'admin' THEN 0 ELSE 1 END ASC,
+        booksCount DESC,
+        u.id ASC
+      LIMIT 1
+    `
+    )
+    .get(targetUserId);
+  return source ? Number(source.id) : null;
+}
+
+function cloneBooksFromSourceUser(sourceUserId, targetUserId, options = {}) {
+  const sourceBooks = db
+    .prepare(
+      `
+      SELECT
+        year,
+        volume,
+        title,
+        author,
+        isbn,
+        month,
+        meeting_starts_at AS meetingStartsAt,
+        meeting_location AS meetingLocation,
+        thumbnail_url AS thumbnailUrl,
+        featured_image_url AS featuredImageUrl,
+        resources_json AS resourcesJson,
+        is_featured AS isFeatured
+      FROM books
+      WHERE user_id = ?
+      ORDER BY volume ASC, year ASC, created_at ASC
+    `
+    )
+    .all(sourceUserId);
+
+  if (!Array.isArray(sourceBooks) || sourceBooks.length === 0) return 0;
+
+  const insertBook = db.prepare(
+    `
+      INSERT INTO books (
+        id,
+        user_id,
+        year,
+        volume,
+        title,
+        author,
+        isbn,
+        month,
+        meeting_starts_at,
+        meeting_location,
+        thumbnail_url,
+        featured_image_url,
+        resources_json,
+        is_featured,
+        is_completed,
+        completed_at,
+        rating,
+        rated_at,
+        created_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL, NULL, ?)
+    `
+  );
+
+  const runClone = () => {
+    let insertedCount = 0;
+    const now = new Date().toISOString();
+    for (const book of sourceBooks) {
+      const normalizedVolume = Number(book.volume);
+      const parsedYear = Number.parseInt(String(book.year ?? ""), 10);
+      const normalizedYear = Number.isFinite(parsedYear) && parsedYear > 0
+        ? parsedYear
+        : volumeToLegacyYear(normalizedVolume);
+      insertBook.run(
+        randomUUID(),
+        targetUserId,
+        normalizedYear,
+        normalizedVolume,
+        book.title,
+        book.author,
+        book.isbn || null,
+        book.month,
+        book.meetingStartsAt || null,
+        book.meetingLocation || null,
+        book.thumbnailUrl || null,
+        book.featuredImageUrl || null,
+        book.resourcesJson || "[]",
+        book.isFeatured ? 1 : 0,
+        now
+      );
+      insertedCount += 1;
+    }
+    return insertedCount;
+  };
+
+  if (options.inTransaction) {
+    return runClone();
+  }
+
+  const cloneTransaction = db.transaction(() => runClone());
+  return cloneTransaction();
+}
+
+function initializeBooksForUser(userId) {
+  const hasBooks = db.prepare("SELECT COUNT(*) AS count FROM books WHERE user_id = ?").get(userId).count > 0;
+  if (hasBooks) return;
+
+  const sourceUserId = getCatalogSourceUserId(userId);
+  if (sourceUserId && cloneBooksFromSourceUser(sourceUserId, userId) > 0) {
+    return;
+  }
+
+  seedBooksForUser(userId);
+}
+
+function resyncCatalogForUser(targetUserId) {
+  const sourceUserId = getCatalogSourceUserId(targetUserId);
+  if (!sourceUserId) return null;
+
+  const applyResync = db.transaction(() => {
+    const booksDeleted = Number(
+      db.prepare("SELECT COUNT(*) AS count FROM books WHERE user_id = ?").get(targetUserId)?.count || 0
+    );
+    db.prepare("DELETE FROM books WHERE user_id = ?").run(targetUserId);
+    const booksInserted = cloneBooksFromSourceUser(sourceUserId, targetUserId, { inTransaction: true });
+    return { sourceUserId, booksDeleted, booksInserted };
+  });
+
+  const result = applyResync();
+  if (!result || result.booksInserted === 0) return null;
+  return result;
 }
 
 function getBooksPayload(userId) {
@@ -2416,7 +2558,7 @@ app.post("/api/auth/register", authLimiter, async (req, res) => {
     const isApproved = role === "admin";
     const result = insertUser.run(name, email, passwordHash, role, isApproved ? 1 : 0, now);
     const userId = Number(result.lastInsertRowid);
-    seedBooksForUser(userId);
+    initializeBooksForUser(userId);
     const user = db
       .prepare(
         "SELECT id, name, email, role, is_approved AS isApproved, profile_image_url AS profileImageUrl FROM users WHERE id = ?"
@@ -2606,6 +2748,51 @@ app.post(
         role: "admin",
         isApproved: true
       }
+    });
+  }
+);
+
+app.post(
+  "/api/admin/users/:userId/resync-catalog",
+  requireAuth,
+  requireRole("admin"),
+  adminLimiter,
+  (req, res) => {
+    const parsed = pendingUserIdSchema.safeParse(req.params);
+    if (!parsed.success) {
+      return res.status(400).json({ error: "Invalid user id." });
+    }
+
+    const targetUser = db
+      .prepare("SELECT id, name, email, role, is_approved AS isApproved FROM users WHERE id = ?")
+      .get(parsed.data.userId);
+    if (!targetUser) {
+      return res.status(404).json({ error: "User not found." });
+    }
+    if (!Boolean(targetUser.isApproved)) {
+      return res.status(400).json({ error: "Only approved users can be resynced." });
+    }
+    if (targetUser.role === "admin") {
+      return res.status(400).json({ error: "Use reading list import to update admin catalogs." });
+    }
+    if (Number(targetUser.id) === Number(req.userId)) {
+      return res.status(400).json({ error: "You cannot resync your own account from this action." });
+    }
+
+    const summary = resyncCatalogForUser(Number(targetUser.id));
+    if (!summary) {
+      return res.status(400).json({
+        error: "No source catalog is available to sync from yet."
+      });
+    }
+
+    return res.json({
+      user: {
+        id: targetUser.id,
+        name: targetUser.name,
+        email: targetUser.email
+      },
+      summary
     });
   }
 );

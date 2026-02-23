@@ -84,6 +84,7 @@ const pendingUsers = ref([]);
 const approvingUserId = ref("");
 const denyingUserId = ref("");
 const promotingMemberId = ref("");
+const resyncingMemberId = ref("");
 const uploadMode = ref("append");
 const readingListFile = ref(null);
 const readingListDropActive = ref(false);
@@ -1149,6 +1150,7 @@ async function logout() {
     featuredFallbackDropActive.value = false;
     removingFeaturedFallbackUrl.value = "";
     pendingUsers.value = [];
+    resyncingMemberId.value = "";
     adminMessage.value = "";
     readingListFile.value = null;
     dashboardStats.value = {
@@ -1802,6 +1804,33 @@ async function promoteMember(member) {
   }
 }
 
+async function resyncMemberCatalog(member) {
+  if (!isAdmin.value || !member?.id || member.role === "admin") return;
+  const confirmed = window.confirm(
+    `Resync ${member.name}'s catalog from the current live catalog?\n\nThis replaces their entire personal book list and resets their completion, ratings, and comments.`
+  );
+  if (!confirmed) return;
+
+  resyncingMemberId.value = String(member.id);
+  adminMessage.value = "";
+  try {
+    const payload = await api(`/admin/users/${encodeURIComponent(String(member.id))}/resync-catalog`, {
+      method: "POST"
+    });
+    await loadDashboard();
+    if (routeMemberId.value === Number(member.id)) {
+      await loadMemberProfile(Number(member.id));
+    }
+    adminMessageTone.value = "success";
+    adminMessage.value = `Resynced ${member.name}. Replaced ${payload.summary.booksDeleted} book(s) with ${payload.summary.booksInserted}.`;
+  } catch (error) {
+    adminMessageTone.value = "error";
+    adminMessage.value = error.message;
+  } finally {
+    resyncingMemberId.value = "";
+  }
+}
+
 function toggleVolumeMenu() {
   activeView.value = "volume";
   if (volumes.value.length === 0) {
@@ -1861,10 +1890,12 @@ function closeMemberProfile() {
               class="text-left transition hover:opacity-90"
               @click="goHome"
             >
-              <h1 class="brand-title-shadow text-4xl font-bold tracking-tight">Stout Hearts</h1>
-              <p class="mt-1 italic text-zinc-600 dark:text-zinc-300">"A friend is useful, far or near; the nearer the better"</p>
+              <h1 class="brand-title-shadow text-3xl font-bold tracking-tight sm:text-4xl">Stout Hearts</h1>
+              <p class="mt-1 max-w-[17rem] text-xs italic leading-tight text-zinc-600 dark:text-zinc-300 sm:max-w-none sm:text-sm">
+                "A friend is useful, far or near; the nearer the better"
+              </p>
             </button>
-            <nav v-if="user" class="flex flex-wrap items-center gap-2">
+            <nav v-if="user" class="flex w-full flex-wrap items-center gap-2 sm:w-auto">
               <div ref="volumeMenuRef" class="relative">
                 <button
                   class="btn-tab icon-btn"
@@ -1874,12 +1905,13 @@ function closeMemberProfile() {
                   <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
                     <path stroke-linecap="round" stroke-linejoin="round" d="M6 9l6 6 6-6" />
                   </svg>
-                  <span>Volume</span>
+                  <span class="sm:hidden">Vol</span>
+                  <span class="hidden sm:inline">Volume</span>
                   <span v-if="selectedVolumeLabel !== null"> {{ selectedVolumeLabel }}</span>
                 </button>
                 <div
                   v-if="showVolumeMenu"
-                  class="absolute left-0 z-20 mt-2 min-w-56 rounded-md border border-zinc-200 bg-white p-1 shadow-lg dark:border-[#313947] dark:bg-[#151A22]"
+                  class="absolute left-0 z-20 mt-2 min-w-52 max-w-[calc(100vw-2rem)] rounded-md border border-zinc-200 bg-white p-1 shadow-lg dark:border-[#313947] dark:bg-[#151A22]"
                 >
                   <button
                     v-for="volumeGroup in volumes"
@@ -1913,7 +1945,8 @@ function closeMemberProfile() {
                 <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
                   <path stroke-linecap="round" stroke-linejoin="round" d="M12 3l7 3v6c0 4.3-2.8 7.6-7 9-4.2-1.4-7-4.7-7-9V6l7-3Z" />
                 </svg>
-                <span>Admin</span>
+                <span class="sm:hidden">Adm</span>
+                <span class="hidden sm:inline">Admin</span>
                 <span
                   v-if="pendingRequestCount > 0"
                   class="ml-2 inline-flex min-w-5 items-center justify-center rounded-full bg-[#A62014] px-1.5 py-0.5 text-xs font-semibold leading-none text-white"
@@ -1923,7 +1956,7 @@ function closeMemberProfile() {
               </button>
             </nav>
           </div>
-          <div class="flex items-center gap-2 sm:gap-3">
+          <div class="flex w-full items-center justify-end gap-2 sm:w-auto sm:gap-3">
             <button
               v-if="user"
               class="btn-secondary inline-flex items-center gap-2 px-2 py-1.5"
@@ -1938,7 +1971,7 @@ function closeMemberProfile() {
                 />
                 <span v-else>{{ getInitials(user.name) }}</span>
               </span>
-              <span class="text-sm text-zinc-600 dark:text-zinc-300">
+              <span class="hidden text-sm text-zinc-600 dark:text-zinc-300 md:inline">
                 {{ user.name }} ({{ user.role }})
               </span>
             </button>
@@ -1948,7 +1981,7 @@ function closeMemberProfile() {
                 <path stroke-linecap="round" stroke-linejoin="round" d="M20 12H9" />
                 <path stroke-linecap="round" stroke-linejoin="round" d="M12 20H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h7" />
               </svg>
-              <span>Sign out</span>
+              <span class="hidden sm:inline">Sign out</span>
             </button>
             <button
               class="btn-secondary inline-flex h-10 w-10 items-center justify-center p-0"
@@ -2105,15 +2138,15 @@ function closeMemberProfile() {
 
         <section v-if="activeView === 'volume' && viewingBookDetails" class="space-y-4">
           <section v-if="selectedBook" class="panel space-y-4">
-            <div class="flex items-center justify-between gap-3">
+            <div class="flex flex-wrap items-center justify-between gap-3">
               <button class="btn-secondary icon-btn" @click="closeBookDetails">
                 <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
                   <path stroke-linecap="round" stroke-linejoin="round" d="M15 18l-6-6 6-6" />
                 </svg>
                 <span>Back to Volume</span>
               </button>
-              <div class="flex items-center gap-2 sm:gap-3">
-                <p class="text-sm text-zinc-600 dark:text-zinc-300">Volume {{ selectedBook.volume }}</p>
+              <div class="flex flex-wrap items-center gap-2 sm:gap-3">
+                <p class="text-sm text-zinc-600 dark:text-zinc-300">Vol {{ selectedBook.volume }}</p>
                 <p
                   v-if="selectedBook.isFeatured"
                   class="text-xs font-semibold uppercase tracking-wide text-[#C8963E] dark:text-[#C8963E]"
@@ -2135,7 +2168,8 @@ function closeMemberProfile() {
                       d="M19.4 15a1.8 1.8 0 0 0 .36 2l.07.08a2.2 2.2 0 1 1-3.1 3.1l-.09-.07a1.8 1.8 0 0 0-2-.36 1.8 1.8 0 0 0-1.09 1.65V22a2.2 2.2 0 0 1-4.4 0v-.11a1.8 1.8 0 0 0-1.08-1.65 1.8 1.8 0 0 0-2 .36l-.1.07a2.2 2.2 0 1 1-3.1-3.1l.08-.08a1.8 1.8 0 0 0 .36-2 1.8 1.8 0 0 0-1.65-1.09H2.2a2.2 2.2 0 1 1 0-4.4h.12a1.8 1.8 0 0 0 1.65-1.08 1.8 1.8 0 0 0-.36-2l-.08-.1a2.2 2.2 0 1 1 3.1-3.1l.1.08a1.8 1.8 0 0 0 2 .36H8.8a1.8 1.8 0 0 0 1.09-1.65V2.2a2.2 2.2 0 1 1 4.4 0v.12a1.8 1.8 0 0 0 1.08 1.65 1.8 1.8 0 0 0 2-.36l.09-.08a2.2 2.2 0 1 1 3.1 3.1l-.07.1a1.8 1.8 0 0 0-.36 2v.04a1.8 1.8 0 0 0 1.64 1.07h.12a2.2 2.2 0 1 1 0 4.4h-.12a1.8 1.8 0 0 0-1.64 1.08V15Z"
                     />
                   </svg>
-                  <span>Admin Settings</span>
+                  <span class="hidden sm:inline">Admin Settings</span>
+                  <span class="sm:hidden">Settings</span>
                 </button>
               </div>
             </div>
@@ -2202,9 +2236,9 @@ function closeMemberProfile() {
                   </svg>
                 </label>
               </div>
-              <div class="relative min-h-[10rem] px-4 pb-4 pl-36 pt-16 sm:min-h-[11rem] sm:px-6 sm:pb-6 sm:pl-48 sm:pt-8">
+              <div class="relative min-h-[9rem] px-4 pb-4 pl-32 pt-12 sm:min-h-[11rem] sm:px-6 sm:pb-6 sm:pl-48 sm:pt-8">
                 <div
-                  class="absolute -top-20 left-4 h-48 w-32 overflow-hidden rounded-lg bg-transparent shadow-lg ring-1 ring-black/10 dark:ring-white/10 sm:-top-24 sm:h-56 sm:w-36"
+                  class="absolute -top-16 left-4 h-40 w-28 overflow-hidden rounded-lg bg-transparent shadow-lg ring-1 ring-black/10 dark:ring-white/10 sm:-top-24 sm:h-56 sm:w-36"
                 >
                   <button
                     v-if="isAdmin"
@@ -2259,7 +2293,7 @@ function closeMemberProfile() {
                     No cover image
                   </div>
                 </div>
-                <h2 class="text-3xl font-semibold sm:text-4xl">{{ selectedBook.title }}</h2>
+                <h2 class="text-2xl font-semibold sm:text-4xl">{{ selectedBook.title }}</h2>
                 <p class="mt-1 text-zinc-700 dark:text-zinc-300">by {{ selectedBook.author }}</p>
                 <p class="mt-2 text-sm text-zinc-600 dark:text-zinc-300">
                   {{ selectedBook.month }} {{ selectedBook.year }}
@@ -2751,7 +2785,7 @@ function closeMemberProfile() {
                 @toggle-like="toggleCommentLike(selectedBook.id, $event)"
                 @delete-comment="deleteComment(selectedBook.id, $event)"
               />
-              <div class="flex gap-2">
+              <div class="flex flex-col gap-2 sm:flex-row">
                 <input
                   v-model="commentDrafts[selectedBook.id]"
                   class="input"
@@ -2759,11 +2793,11 @@ function closeMemberProfile() {
                   @keyup.enter="addComment(selectedBook.id)"
                 />
                 <button
-                  class="btn-primary icon-btn"
+                  class="btn-primary icon-btn justify-center sm:justify-start"
                   :disabled="commentActionId === `comment:${selectedBook.id}`"
                   @click="addComment(selectedBook.id)"
                 >
-                  <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                  <svg class="ui-icon-lg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
                     <path stroke-linecap="round" stroke-linejoin="round" d="M12 5v14M5 12h14" />
                   </svg>
                   <span>{{ commentActionId === `comment:${selectedBook.id}` ? "Adding..." : "Add" }}</span>
@@ -3031,7 +3065,7 @@ function closeMemberProfile() {
               class="panel w-full overflow-hidden p-0 text-left transition hover:-translate-y-0.5 hover:border-[#C8963E] dark:hover:border-[#C8963E]"
               @click="openBookDetails(featuredBook.id)"
             >
-              <div class="relative h-[30rem]">
+              <div class="relative h-[24rem] sm:h-[30rem]">
                 <div class="h-2/3 overflow-hidden border-b border-zinc-200 dark:border-zinc-700">
                   <img
                     v-if="featuredBookDisplayImageUrl"
@@ -3720,7 +3754,7 @@ function closeMemberProfile() {
               Member Roles
             </h4>
             <p class="text-sm text-zinc-600 dark:text-zinc-300">
-              Promote approved members to admin from here.
+              Promote approved members to admin or resync a member's catalog from the live list.
             </p>
             <p v-if="members.length === 0" class="text-sm text-zinc-600 dark:text-zinc-300">
               No active members yet.
@@ -3747,8 +3781,21 @@ function closeMemberProfile() {
                   <button
                     v-if="member.role !== 'admin'"
                     type="button"
+                    class="btn-secondary icon-btn px-2 py-1 text-xs"
+                    :disabled="resyncingMemberId === String(member.id) || promotingMemberId === String(member.id)"
+                    @click="resyncMemberCatalog(member)"
+                  >
+                    <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M3 12a9 9 0 1 0 3-6.7"></path>
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M3 4v5h5"></path>
+                    </svg>
+                    <span>{{ resyncingMemberId === String(member.id) ? "Resyncing..." : "Resync Catalog" }}</span>
+                  </button>
+                  <button
+                    v-if="member.role !== 'admin'"
+                    type="button"
                     class="btn-primary icon-btn px-2 py-1 text-xs"
-                    :disabled="promotingMemberId === String(member.id)"
+                    :disabled="promotingMemberId === String(member.id) || resyncingMemberId === String(member.id)"
                     @click="promoteMember(member)"
                   >
                     <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
