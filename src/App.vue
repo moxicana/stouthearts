@@ -40,6 +40,7 @@ const ratingBookId = ref("");
 const featuringBookId = ref("");
 const featureStarAnimatingBookId = ref("");
 const savingBookIsbn = ref(false);
+const savingBookDetails = ref(false);
 const savingBookCover = ref(false);
 const deletingBookRecord = ref(false);
 const uploadingBookFeaturedImage = ref(false);
@@ -47,7 +48,7 @@ const uploadingReadingList = ref(false);
 const clearingVolume = ref(false);
 const clearingUploadHistory = ref(false);
 const backfillingCovers = ref(false);
-const backfillingThriftBooks = ref(false);
+const backfillingResources = ref(false);
 const uploadingFeaturedFallbacks = ref(false);
 const removingFeaturedFallbackUrl = ref("");
 const errorMessage = ref("");
@@ -98,6 +99,8 @@ const singleRecordForm = ref({
   volume: "",
   title: "",
   author: "",
+  fictionType: "",
+  genre: "",
   month: "",
   year: "",
   isbn: "",
@@ -133,6 +136,12 @@ const isbnMessage = ref("");
 const isbnMessageTone = ref("success");
 const isbnForm = ref({
   isbn: ""
+});
+const detailsMessage = ref("");
+const detailsMessageTone = ref("success");
+const detailsForm = ref({
+  fictionType: "",
+  genre: ""
 });
 const coverMessage = ref("");
 const coverMessageTone = ref("success");
@@ -263,6 +272,10 @@ const MONTH_OPTIONS = [
   "November",
   "December"
 ];
+const FICTION_TYPE_OPTIONS = [
+  { value: "fiction", label: "Fiction" },
+  { value: "nonfiction", label: "Nonfiction" }
+];
 
 watch(isDark, (value) => {
   localStorage.setItem(THEME_KEY, value ? "dark" : "light");
@@ -305,6 +318,8 @@ watch(selectedBook, (value) => {
     selectedVolume.value = value.volume;
   }
   if (value) {
+    resetBookDetailsForm(value);
+    detailsMessage.value = "";
     resetIsbnForm(value);
     isbnMessage.value = "";
     resetCoverForm(value);
@@ -440,6 +455,11 @@ function formatCommentTime(value) {
     minute: "2-digit",
     hour12: true
   });
+}
+
+function formatFictionTypeLabel(value) {
+  if (!value) return "";
+  return value === "nonfiction" ? "Nonfiction" : "Fiction";
 }
 
 function getHostname(value) {
@@ -730,6 +750,13 @@ function resetMeetingForm(book = selectedBook.value) {
   };
 }
 
+function resetBookDetailsForm(book = selectedBook.value) {
+  detailsForm.value = {
+    fictionType: book?.fictionType || "",
+    genre: book?.genre || ""
+  };
+}
+
 function resetIsbnForm(book = selectedBook.value) {
   isbnForm.value = {
     isbn: book?.isbn || ""
@@ -764,6 +791,38 @@ async function saveBookIsbn() {
   } finally {
     savingBookIsbn.value = false;
   }
+}
+
+async function saveBookDetails() {
+  if (!isAdmin.value || !selectedBook.value) return;
+  detailsMessage.value = "";
+  const fictionType = String(detailsForm.value.fictionType || "").trim();
+  const genre = String(detailsForm.value.genre || "").trim();
+
+  savingBookDetails.value = true;
+  try {
+    await api(`/admin/books/${encodeURIComponent(selectedBook.value.id)}/details`, {
+      method: "PUT",
+      body: JSON.stringify({
+        fictionType: fictionType || null,
+        genre: genre || null
+      })
+    });
+    await loadBooks();
+    detailsMessageTone.value = "success";
+    detailsMessage.value = "Book details saved.";
+  } catch (error) {
+    detailsMessageTone.value = "error";
+    detailsMessage.value = error.message;
+  } finally {
+    savingBookDetails.value = false;
+  }
+}
+
+async function clearBookDetails() {
+  if (!isAdmin.value || !selectedBook.value) return;
+  detailsForm.value = { fictionType: "", genre: "" };
+  await saveBookDetails();
 }
 
 async function clearBookIsbn() {
@@ -1169,6 +1228,8 @@ async function logout() {
     profileMessage.value = "";
     meetingForm.value = { date: "", time: "", location: "" };
     meetingMessage.value = "";
+    detailsForm.value = { fictionType: "", genre: "" };
+    detailsMessage.value = "";
     isbnForm.value = { isbn: "" };
     isbnMessage.value = "";
     coverForm.value = { thumbnailUrl: "" };
@@ -1353,7 +1414,7 @@ async function setFeaturedBookForVolume(bookId) {
 
 function formatUploadMode(value) {
   if (value === "backfill") return "Backfill Covers";
-  if (value === "backfill-thriftbooks") return "Backfill ThriftBooks";
+  if (value === "backfill-thriftbooks") return "Backfill Resource Links";
   if (value === "clear") return "Clear Volume";
   return value === "replace" ? "Replace" : "Append";
 }
@@ -1384,6 +1445,8 @@ function resetSingleRecordForm() {
     volume: String(currentVolume.value || ""),
     title: "",
     author: "",
+    fictionType: "",
+    genre: "",
     month: "",
     year: "",
     isbn: "",
@@ -1428,6 +1491,10 @@ async function autofillSingleRecordFromIsbn(force = false) {
     singleRecordForm.value.isbn = book.isbn || normalizedIsbn;
     if (book.title) singleRecordForm.value.title = book.title;
     if (book.author) singleRecordForm.value.author = book.author;
+    if (book.fictionType === "fiction" || book.fictionType === "nonfiction") {
+      singleRecordForm.value.fictionType = book.fictionType;
+    }
+    if (book.genre) singleRecordForm.value.genre = book.genre;
     if (book.thumbnailUrl) singleRecordForm.value.thumbnailUrl = book.thumbnailUrl;
     if (!singleRecordForm.value.month && book.month) {
       singleRecordForm.value.month = book.month;
@@ -1451,6 +1518,8 @@ async function submitSingleRecord() {
     volume: Number(singleRecordForm.value.volume),
     title: singleRecordForm.value.title.trim(),
     author: singleRecordForm.value.author.trim(),
+    fictionType: singleRecordForm.value.fictionType || undefined,
+    genre: singleRecordForm.value.genre.trim() || undefined,
     month: singleRecordForm.value.month,
     year: Number(singleRecordForm.value.year),
     isbn: singleRecordForm.value.isbn.trim(),
@@ -1623,9 +1692,9 @@ async function backfillCoverImages() {
   }
 }
 
-async function backfillThriftBooksResources() {
+async function backfillResourceLinks() {
   adminMessage.value = "";
-  backfillingThriftBooks.value = true;
+  backfillingResources.value = true;
   try {
     const payload = await api("/admin/reading-list/backfill-thriftbooks", {
       method: "POST"
@@ -1633,12 +1702,12 @@ async function backfillThriftBooksResources() {
     await loadBooks();
     await loadUploadHistory();
     adminMessageTone.value = "success";
-    adminMessage.value = `ThriftBooks backfill complete. Updated ${payload.summary.booksUpdated} book resource list(s) from ${payload.summary.candidates} candidate record(s).`;
+    adminMessage.value = `Resource links backfill complete. Updated ${payload.summary.booksUpdated} book resource list(s) from ${payload.summary.candidates} candidate record(s).`;
   } catch (error) {
     adminMessageTone.value = "error";
     adminMessage.value = error.message;
   } finally {
-    backfillingThriftBooks.value = false;
+    backfillingResources.value = false;
   }
 }
 
@@ -2296,6 +2365,23 @@ function closeMemberProfile() {
                 </div>
                 <h2 class="text-2xl font-semibold sm:text-4xl">{{ selectedBook.title }}</h2>
                 <p class="mt-1 text-zinc-700 dark:text-zinc-300">by {{ selectedBook.author }}</p>
+                <div
+                  v-if="selectedBook.fictionType || selectedBook.genre"
+                  class="mt-2 flex flex-wrap items-center gap-2"
+                >
+                  <span
+                    v-if="selectedBook.fictionType"
+                    class="rounded-full bg-zinc-200 px-2.5 py-1 text-xs font-semibold text-zinc-700 dark:bg-[#232A36] dark:text-zinc-100"
+                  >
+                    {{ formatFictionTypeLabel(selectedBook.fictionType) }}
+                  </span>
+                  <span
+                    v-if="selectedBook.genre"
+                    class="rounded-full bg-zinc-200 px-2.5 py-1 text-xs font-semibold text-zinc-700 dark:bg-[#232A36] dark:text-zinc-100"
+                  >
+                    {{ selectedBook.genre }}
+                  </span>
+                </div>
                 <p class="mt-2 text-sm text-zinc-600 dark:text-zinc-300">
                   {{ selectedBook.month }} {{ selectedBook.year }}
                 </p>
@@ -2552,6 +2638,68 @@ function closeMemberProfile() {
 
                   <div class="p-4 sm:p-6">
                     <div class="grid gap-3">
+                      <form class="card space-y-2" @submit.prevent="saveBookDetails">
+                        <p class="text-sm font-semibold">Book Details</p>
+                        <label class="field-label">
+                          Fiction Type
+                          <select v-model="detailsForm.fictionType" class="input">
+                            <option value="">Not set</option>
+                            <option
+                              v-for="option in FICTION_TYPE_OPTIONS"
+                              :key="option.value"
+                              :value="option.value"
+                            >
+                              {{ option.label }}
+                            </option>
+                          </select>
+                        </label>
+                        <label class="field-label">
+                          Genre
+                          <input
+                            v-model="detailsForm.genre"
+                            class="input"
+                            type="text"
+                            maxlength="80"
+                            placeholder="Fantasy, Memoir, History..."
+                          />
+                        </label>
+                        <p
+                          v-if="detailsMessage"
+                          class="text-sm"
+                          :class="
+                            detailsMessageTone === 'error'
+                              ? 'text-[#A62014] dark:text-[#A62014]'
+                              : 'text-[#C8963E] dark:text-[#C8963E]'
+                          "
+                        >
+                          {{ detailsMessage }}
+                        </p>
+                        <div class="flex gap-2">
+                          <button class="btn-primary" :disabled="savingBookDetails">
+                            {{ savingBookDetails ? "Saving..." : "Save Details" }}
+                          </button>
+                          <button
+                            type="button"
+                            class="btn-secondary"
+                            :disabled="savingBookDetails"
+                            @click="resetBookDetailsForm(selectedBook)"
+                          >
+                            Reset
+                          </button>
+                          <button
+                            type="button"
+                            class="btn-danger"
+                            :disabled="
+                              savingBookDetails ||
+                              (!selectedBook.fictionType && !selectedBook.genre && !detailsForm.fictionType && !(detailsForm.genre || '').trim())
+                            "
+                            @click="clearBookDetails"
+                          >
+                            {{ savingBookDetails ? "Clearing..." : "Clear Details" }}
+                          </button>
+                        </div>
+                      </form>
+
                       <form class="card space-y-2" @submit.prevent="saveBookIsbn">
                 <p class="text-sm font-semibold">ISBN</p>
                 <label class="field-label">
@@ -3430,6 +3578,19 @@ function closeMemberProfile() {
                   Author *
                   <input v-model="singleRecordForm.author" class="input" type="text" maxlength="160" required />
                 </label>
+                <label class="field-label">
+                  Fiction Type (optional)
+                  <select v-model="singleRecordForm.fictionType" class="input">
+                    <option value="">-- select --</option>
+                    <option v-for="option in FICTION_TYPE_OPTIONS" :key="option.value" :value="option.value">
+                      {{ option.label }}
+                    </option>
+                  </select>
+                </label>
+                <label class="field-label">
+                  Genre (optional)
+                  <input v-model="singleRecordForm.genre" class="input" type="text" maxlength="80" />
+                </label>
                 <label class="field-label md:col-span-2 xl:col-span-3">
                   Thumbnail URL *
                   <input
@@ -3495,6 +3656,10 @@ function closeMemberProfile() {
                     <p class="font-medium text-zinc-900 dark:text-zinc-100">{{ record.title }}</p>
                     <p class="text-xs text-zinc-600 dark:text-zinc-300">
                       Volume {{ record.volume }} • {{ record.month }} {{ record.year }} • {{ record.author }}
+                    </p>
+                    <p v-if="record.fictionType || record.genre" class="text-xs text-zinc-500 dark:text-zinc-300">
+                      {{ record.fictionType ? formatFictionTypeLabel(record.fictionType) : "Type not set" }}
+                      <span v-if="record.genre"> • {{ record.genre }}</span>
                     </p>
                   </div>
                   <span class="text-xs text-zinc-500 dark:text-zinc-300">{{ record.isbn }}</span>
@@ -3565,7 +3730,7 @@ function closeMemberProfile() {
               <div class="card space-y-3 text-sm leading-relaxed text-zinc-600 dark:text-zinc-300">
                 <p class="text-xs font-semibold uppercase tracking-wide text-zinc-700 dark:text-zinc-300">Column Reference</p>
                 <p>Required: `volume`, `title`, `author`, `month`.</p>
-                <p>Optional: `year` (scheduled read year), `isbn`, `meetingStartsAt`, `meetingLocation`, `thumbnailUrl`, `isFeatured`, `resources`.</p>
+                <p>Optional: `year` (scheduled read year), `fictionType`, `genre`, `isbn`, `meetingStartsAt`, `meetingLocation`, `thumbnailUrl`, `isFeatured`, `resources`.</p>
                 <p>Rules: `volume` integer 1-99, `year` 2025-2100, valid ISBN-10/13, valid URLs, valid meeting date/time.</p>
               </div>
 
@@ -3674,7 +3839,7 @@ function closeMemberProfile() {
                 <div class="flex flex-wrap gap-3">
                   <button
                     class="btn-danger icon-btn"
-                    :disabled="uploadingReadingList || clearingVolume || clearingUploadHistory || backfillingCovers || backfillingThriftBooks"
+                    :disabled="uploadingReadingList || clearingVolume || clearingUploadHistory || backfillingCovers || backfillingResources"
                     @click="clearVolumeBooks"
                   >
                     <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
@@ -3684,7 +3849,7 @@ function closeMemberProfile() {
                   </button>
                   <button
                     class="btn-secondary icon-btn"
-                    :disabled="uploadingReadingList || clearingVolume || clearingUploadHistory || backfillingCovers || backfillingThriftBooks"
+                    :disabled="uploadingReadingList || clearingVolume || clearingUploadHistory || backfillingCovers || backfillingResources"
                     @click="backfillCoverImages"
                   >
                     <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
@@ -3695,19 +3860,19 @@ function closeMemberProfile() {
                   </button>
                   <button
                     class="btn-secondary icon-btn"
-                    :disabled="uploadingReadingList || clearingVolume || clearingUploadHistory || backfillingCovers || backfillingThriftBooks"
-                    @click="backfillThriftBooksResources"
+                    :disabled="uploadingReadingList || clearingVolume || clearingUploadHistory || backfillingCovers || backfillingResources"
+                    @click="backfillResourceLinks"
                   >
                     <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
                       <path stroke-linecap="round" stroke-linejoin="round" d="M4 6h16v12H4z"></path>
                       <path stroke-linecap="round" stroke-linejoin="round" d="M8 10h8M8 14h6"></path>
                     </svg>
-                    <span>{{ backfillingThriftBooks ? "Backfilling..." : "Backfill ThriftBooks" }}</span>
+                    <span>{{ backfillingResources ? "Backfilling..." : "Backfill Resource Links" }}</span>
                   </button>
                 </div>
                 <button
                   class="btn-primary icon-btn"
-                  :disabled="uploadingReadingList || clearingVolume || clearingUploadHistory || backfillingCovers || backfillingThriftBooks"
+                  :disabled="uploadingReadingList || clearingVolume || clearingUploadHistory || backfillingCovers || backfillingResources"
                   @click="uploadReadingList"
                 >
                   <svg class="ui-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">

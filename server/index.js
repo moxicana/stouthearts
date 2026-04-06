@@ -91,6 +91,8 @@ CREATE TABLE IF NOT EXISTS books (
   volume INTEGER NOT NULL DEFAULT 1,
   title TEXT NOT NULL,
   author TEXT NOT NULL,
+  fiction_type TEXT,
+  genre TEXT,
   isbn TEXT,
   month TEXT NOT NULL,
   meeting_starts_at TEXT,
@@ -161,6 +163,8 @@ const addedVolumeColumn = ensureColumnExists(
 );
 ensureColumnExists("books", "thumbnail_url", "ALTER TABLE books ADD COLUMN thumbnail_url TEXT");
 ensureColumnExists("books", "featured_image_url", "ALTER TABLE books ADD COLUMN featured_image_url TEXT");
+ensureColumnExists("books", "fiction_type", "ALTER TABLE books ADD COLUMN fiction_type TEXT");
+ensureColumnExists("books", "genre", "ALTER TABLE books ADD COLUMN genre TEXT");
 ensureColumnExists(
   "books",
   "resources_json",
@@ -337,11 +341,15 @@ function normalizeHttpOrRootRelativeUrl(value) {
 }
 
 const readingListModeSchema = z.enum(["append", "replace"]);
+const FICTION_TYPE_VALUES = ["fiction", "nonfiction"];
+const fictionTypeSchema = z.enum(FICTION_TYPE_VALUES);
 const singleRecordSchema = z.object({
   mode: readingListModeSchema.optional().default("append"),
   volume: z.coerce.number().int().min(1).max(99),
   title: z.string().trim().min(1).max(200),
   author: z.string().trim().min(1).max(160),
+  fictionType: fictionTypeSchema.optional(),
+  genre: z.string().trim().min(1).max(80).optional(),
   month: z.string().trim().min(1).max(30),
   year: z.coerce.number().int().min(2025).max(2100),
   isbn: z
@@ -392,6 +400,10 @@ const bookIsbnSchema = z.object({
 const bookThumbnailSchema = z.object({
   thumbnailUrl: z.union([z.string().trim().url().max(500), z.null()]).optional()
 });
+const bookDetailsSchema = z.object({
+  fictionType: z.union([z.string().trim().max(40), z.null()]).optional(),
+  genre: z.union([z.string().trim().max(80), z.null()]).optional()
+});
 const featuredImageFallbackSettingsSchema = z.object({
   urls: z
     .array(
@@ -426,6 +438,8 @@ const readingListRowSchema = z.object({
   year: z.coerce.number().int().min(2025).max(2100).optional(),
   title: z.string().trim().min(1).max(200),
   author: z.string().trim().min(1).max(160),
+  fictionType: fictionTypeSchema.optional(),
+  genre: z.string().trim().min(1).max(80).optional(),
   isbn: z.string().regex(/^(?:\d{9}[\dX]|\d{13})$/).optional(),
   month: z.string().trim().min(1).max(30),
   meetingStartsAt: z
@@ -824,6 +838,8 @@ function cloneBooksFromSourceUser(sourceUserId, targetUserId, options = {}) {
         volume,
         title,
         author,
+        fiction_type AS fictionType,
+        genre,
         isbn,
         month,
         meeting_starts_at AS meetingStartsAt,
@@ -850,6 +866,8 @@ function cloneBooksFromSourceUser(sourceUserId, targetUserId, options = {}) {
         volume,
         title,
         author,
+        fiction_type,
+        genre,
         isbn,
         month,
         meeting_starts_at,
@@ -864,7 +882,7 @@ function cloneBooksFromSourceUser(sourceUserId, targetUserId, options = {}) {
         rated_at,
         created_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL, NULL, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL, NULL, ?)
     `
   );
 
@@ -884,6 +902,8 @@ function cloneBooksFromSourceUser(sourceUserId, targetUserId, options = {}) {
         normalizedVolume,
         book.title,
         book.author,
+        book.fictionType || null,
+        book.genre || null,
         book.isbn || null,
         book.month,
         book.meetingStartsAt || null,
@@ -947,6 +967,8 @@ function getBooksPayload(userId) {
         year,
         title,
         author,
+        fiction_type AS fictionType,
+        genre,
         isbn,
         month,
         meeting_starts_at AS meetingStartsAt,
@@ -1097,6 +1119,8 @@ function getBooksPayload(userId) {
     year: book.year,
     title: book.title,
     author: book.author,
+    fictionType: book.fictionType || null,
+    genre: book.genre || null,
     isbn: book.isbn || null,
     month: book.month,
     meetingStartsAt: book.meetingStartsAt || null,
@@ -1414,6 +1438,57 @@ function parseBooleanLike(value) {
   return false;
 }
 
+function normalizeFictionType(value) {
+  if (value === undefined || value === null) return undefined;
+  const normalized = String(value).trim().toLowerCase();
+  if (!normalized) return undefined;
+  if (["fiction", "fic", "f"].includes(normalized)) return "fiction";
+  if (["nonfiction", "non-fiction", "non fiction", "nonfic", "nf", "n/f"].includes(normalized)) {
+    return "nonfiction";
+  }
+  return normalized;
+}
+
+function normalizeGenre(value) {
+  if (value === undefined || value === null) return undefined;
+  const normalized = String(value).trim();
+  if (!normalized) return undefined;
+  return normalized;
+}
+
+function inferFictionTypeFromGenres(genres = []) {
+  if (!Array.isArray(genres) || genres.length === 0) return undefined;
+  const normalizedGenres = genres.map((genre) => String(genre || "").toLowerCase()).filter(Boolean);
+  if (normalizedGenres.length === 0) return undefined;
+  const joined = normalizedGenres.join(" ");
+  if (joined.includes("nonfiction") || joined.includes("non-fiction") || joined.includes("non fiction")) {
+    return "nonfiction";
+  }
+  if (joined.includes("fiction")) {
+    return "fiction";
+  }
+  const nonfictionSignals = [
+    "history",
+    "biography",
+    "memoir",
+    "science",
+    "self-help",
+    "business",
+    "philosophy",
+    "politics",
+    "psychology",
+    "religion",
+    "reference",
+    "guide",
+    "cookbook",
+    "essay"
+  ];
+  if (nonfictionSignals.some((token) => joined.includes(token))) {
+    return "nonfiction";
+  }
+  return undefined;
+}
+
 function parseOptionalNumber(value) {
   if (value === undefined || value === null || value === "") return undefined;
   const numeric = Number(value);
@@ -1468,6 +1543,32 @@ function buildThriftBooksIsbnLookupUrl(isbn) {
   return `https://www.thriftbooks.com/browse/?b.search=${encodeURIComponent(isbn)}`;
 }
 
+function buildAlibrisIsbnLookupUrl(isbn) {
+  if (!isbn) return undefined;
+  return `https://www.alibris.com/booksearch?keyword=${encodeURIComponent(isbn)}`;
+}
+
+function buildGoodreadsIsbnLookupUrl(isbn) {
+  if (!isbn) return undefined;
+  return `https://www.goodreads.com/search?q=${encodeURIComponent(isbn)}`;
+}
+
+function buildAmazonIsbnLookupUrl(isbn) {
+  if (!isbn) return undefined;
+  return `https://www.amazon.com/s?k=${encodeURIComponent(isbn)}`;
+}
+
+function buildAutoResourceLinksForIsbn(isbn) {
+  if (!isbn) return [];
+  const links = [
+    { label: "ThriftBooks", url: buildThriftBooksIsbnLookupUrl(isbn) },
+    { label: "Alibris", url: buildAlibrisIsbnLookupUrl(isbn) },
+    { label: "Goodreads", url: buildGoodreadsIsbnLookupUrl(isbn) },
+    { label: "Amazon", url: buildAmazonIsbnLookupUrl(isbn) }
+  ];
+  return links.filter((link) => Boolean(link.url));
+}
+
 function mergeResourceLinks(primary, additions = []) {
   const merged = [];
   const seen = new Set();
@@ -1494,18 +1595,28 @@ function mergeResourceLinks(primary, additions = []) {
 }
 
 function upsertThriftBooksResource(resources, isbn) {
-  const thriftBooksUrl = buildThriftBooksIsbnLookupUrl(isbn);
-  if (!thriftBooksUrl) return resources;
-
-  const normalized = (resources || []).filter(
-    (resource) => String(resource?.label || "").trim().toLowerCase() !== "thriftbooks"
-  );
-  return mergeResourceLinks(normalized, [{ label: "ThriftBooks", url: thriftBooksUrl }]);
+  return upsertAutoResourceLinks(resources, isbn);
 }
 
 function removeThriftBooksResource(resources) {
+  return removeAutoResourceLinks(resources);
+}
+
+function upsertAutoResourceLinks(resources, isbn) {
+  const resourceLinks = buildAutoResourceLinksForIsbn(isbn);
+  if (resourceLinks.length === 0) return resources;
+
+  const autoLabels = new Set(["thriftbooks", "alibris", "goodreads", "amazon"]);
+  const normalized = (resources || []).filter(
+    (resource) => !autoLabels.has(String(resource?.label || "").trim().toLowerCase())
+  );
+  return mergeResourceLinks(normalized, resourceLinks);
+}
+
+function removeAutoResourceLinks(resources) {
+  const autoLabels = new Set(["thriftbooks", "alibris", "goodreads", "amazon"]);
   return (resources || []).filter(
-    (resource) => String(resource?.label || "").trim().toLowerCase() !== "thriftbooks"
+    (resource) => !autoLabels.has(String(resource?.label || "").trim().toLowerCase())
   );
 }
 
@@ -1631,6 +1742,10 @@ async function lookupGoogleBooksByIsbn(isbn) {
     const payload = await response.json();
     const volume = payload?.items?.[0]?.volumeInfo;
     if (!volume) return null;
+    const categories = Array.isArray(volume.categories)
+      ? volume.categories.map((value) => String(value || "").trim()).filter(Boolean)
+      : [];
+    const genre = categories[0] || undefined;
     const normalizedApiIsbn =
       normalizeIsbn(
         (volume.industryIdentifiers || []).find((entry) => String(entry?.type || "").toUpperCase() === "ISBN_13")
@@ -1644,6 +1759,8 @@ async function lookupGoogleBooksByIsbn(isbn) {
     return {
       title: String(volume.title || "").trim() || undefined,
       author: String(volume.authors?.[0] || "").trim() || undefined,
+      fictionType: inferFictionTypeFromGenres(categories),
+      genre,
       year: getPublishedYear(volume.publishedDate),
       month: getPublishedMonthName(volume.publishedDate),
       thumbnailUrl: extractGoogleBooksImageUrl(volume.imageLinks),
@@ -1665,9 +1782,15 @@ async function lookupOpenLibraryBookByIsbn(isbn) {
     const entry = payload?.[`ISBN:${isbn}`];
     if (!entry) return null;
     const coverCandidate = entry?.cover?.large || entry?.cover?.medium || entry?.cover?.small;
+    const subjects = Array.isArray(entry?.subjects)
+      ? entry.subjects.map((subject) => String(subject?.name || "").trim()).filter(Boolean)
+      : [];
+    const genre = subjects[0] || undefined;
     return {
       title: String(entry?.title || "").trim() || undefined,
       author: String(entry?.authors?.[0]?.name || "").trim() || undefined,
+      fictionType: inferFictionTypeFromGenres(subjects),
+      genre,
       year: getPublishedYearLoose(entry?.publish_date),
       month: getPublishedMonthNameLoose(entry?.publish_date),
       thumbnailUrl: toHttpsUrl(coverCandidate),
@@ -1704,22 +1827,39 @@ async function resolveCoverForIsbn(isbn) {
 }
 
 async function enrichRowsWithCovers(rows) {
-  const coverCacheByIsbn = new Map();
+  const lookupCacheByIsbn = new Map();
   for (const row of rows) {
     if (row.isbn) {
       row.resources = upsertThriftBooksResource(row.resources, row.isbn);
     }
 
-    if (!COVER_ENRICHMENT_ENABLED) continue;
-    if (row.thumbnailUrl || !row.isbn) continue;
-    if (!coverCacheByIsbn.has(row.isbn)) {
-      const openLibraryCover = await lookupOpenLibraryCover(row.isbn);
-      const resolvedCover = openLibraryCover || (await lookupGoogleBooksCover(row.isbn));
-      coverCacheByIsbn.set(row.isbn, resolvedCover || null);
+    if (!row.isbn) continue;
+    const needsMetadata = !row.fictionType || !row.genre;
+    const needsCover = COVER_ENRICHMENT_ENABLED && !row.thumbnailUrl;
+    if (!needsMetadata && !needsCover) continue;
+
+    if (!lookupCacheByIsbn.has(row.isbn)) {
+      const lookedUpBook = await lookupBookByIsbn(row.isbn);
+      lookupCacheByIsbn.set(row.isbn, lookedUpBook || null);
     }
-    const cachedCover = coverCacheByIsbn.get(row.isbn);
-    if (cachedCover) {
-      row.thumbnailUrl = cachedCover;
+
+    const lookedUpBook = lookupCacheByIsbn.get(row.isbn);
+    if (!lookedUpBook) continue;
+
+    if (!row.fictionType) {
+      const normalizedFictionType = normalizeFictionType(lookedUpBook.fictionType);
+      if (normalizedFictionType && FICTION_TYPE_VALUES.includes(normalizedFictionType)) {
+        row.fictionType = normalizedFictionType;
+      }
+    }
+    if (!row.genre) {
+      const normalizedGenre = normalizeGenre(lookedUpBook.genre);
+      if (normalizedGenre && normalizedGenre.length <= 80) {
+        row.genre = normalizedGenre;
+      }
+    }
+    if (needsCover && lookedUpBook.thumbnailUrl) {
+      row.thumbnailUrl = lookedUpBook.thumbnailUrl;
     }
   }
 
@@ -1799,7 +1939,7 @@ async function backfillMissingCoversForExistingBooks() {
   };
 }
 
-function backfillThriftBooksResourcesForExistingBooks() {
+function backfillResourceLinksForExistingBooks() {
   const candidates = db
     .prepare(
       `
@@ -1819,7 +1959,7 @@ function backfillThriftBooksResourcesForExistingBooks() {
       if (!normalizedIsbn) continue;
 
       const existingResources = parseResourcesJson(row.resourcesJson);
-      const mergedResources = upsertThriftBooksResource(existingResources, normalizedIsbn);
+      const mergedResources = upsertAutoResourceLinks(existingResources, normalizedIsbn);
       if (!mergedResources) continue;
 
       const hasChanged =
@@ -2008,6 +2148,10 @@ function parseReadingListRows(fileBuffer, fileName, mimeType, defaultVolume) {
       year: normalizedYear,
       title: getRowField(row, ["title", "Title"]),
       author: getRowField(row, ["author", "Author"]),
+      fictionType: normalizeFictionType(
+        getRowField(row, ["fictionType", "fiction_type", "fictionNonfiction", "fiction_nonfiction", "type"])
+      ),
+      genre: normalizeGenre(getRowField(row, ["genre", "Genre"])),
       isbn: normalizeIsbn(getRowField(row, ["isbn", "ISBN"])),
       month: getRowField(row, ["month", "Month"]),
       meetingStartsAt,
@@ -2052,6 +2196,8 @@ function applyReadingListToAllUsers(rows, mode) {
         volume,
         title,
         author,
+        fiction_type,
+        genre,
         isbn,
         month,
         meeting_starts_at,
@@ -2062,7 +2208,7 @@ function applyReadingListToAllUsers(rows, mode) {
         is_featured,
         created_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `
   );
   const updateBook = db.prepare(
@@ -2070,6 +2216,8 @@ function applyReadingListToAllUsers(rows, mode) {
       UPDATE books
       SET
         month = ?,
+        fiction_type = COALESCE(?, fiction_type),
+        genre = COALESCE(?, genre),
         meeting_starts_at = COALESCE(?, meeting_starts_at),
         meeting_location = COALESCE(?, meeting_location),
         thumbnail_url = COALESCE(?, thumbnail_url),
@@ -2103,6 +2251,8 @@ function applyReadingListToAllUsers(rows, mode) {
         if (existing) {
           updateBook.run(
             row.month,
+            row.fictionType || null,
+            row.genre || null,
             row.meetingStartsAt || null,
             row.meetingLocation || null,
             row.thumbnailUrl || null,
@@ -2126,6 +2276,8 @@ function applyReadingListToAllUsers(rows, mode) {
           row.volume,
           row.title,
           row.author,
+          row.fictionType || null,
+          row.genre || null,
           row.isbn || null,
           row.month,
           row.meetingStartsAt || null,
@@ -2307,8 +2459,13 @@ async function updateIsbnForBookForAllUsers(requestUserId, referenceBookId, isbn
     return { error: "ISBN must be a valid ISBN-10 or ISBN-13." };
   }
   const nextIsbn = normalizedIsbn || null;
+  const lookedUpBook = nextIsbn ? await lookupBookByIsbn(nextIsbn) : null;
+  const resolvedFictionType = normalizeFictionType(lookedUpBook?.fictionType);
+  const resolvedGenre = normalizeGenre(lookedUpBook?.genre);
+  const shouldSyncBookDetails = Boolean(nextIsbn && (resolvedFictionType || resolvedGenre));
   const resolvedCover = nextIsbn ? await resolveCoverForIsbn(nextIsbn) : null;
   const thriftBooksUrl = nextIsbn ? buildThriftBooksIsbnLookupUrl(nextIsbn) : null;
+  const resourceLinks = nextIsbn ? buildAutoResourceLinksForIsbn(nextIsbn) : [];
 
   const selectMatchingBookResources = db.prepare(
     `
@@ -2318,6 +2475,15 @@ async function updateIsbnForBookForAllUsers(requestUserId, referenceBookId, isbn
     `
   );
   const updateResourcesById = db.prepare("UPDATE books SET resources_json = ? WHERE id = ?");
+  const updateBookDetailsByIdentity = db.prepare(
+    `
+      UPDATE books
+      SET
+        fiction_type = COALESCE(?, fiction_type),
+        genre = COALESCE(?, genre)
+      WHERE volume = ? AND lower(title) = lower(?) AND lower(author) = lower(?)
+    `
+  );
 
   const applyTransaction = db.transaction(() => {
     const usersAffected = db.prepare("SELECT COUNT(*) AS count FROM users").get().count;
@@ -2331,6 +2497,7 @@ async function updateIsbnForBookForAllUsers(requestUserId, referenceBookId, isbn
       )
       .run(nextIsbn, referenceBook.volume, referenceBook.title, referenceBook.author).changes;
     let coversUpdated = 0;
+    let detailsUpdated = 0;
     let resourcesUpdated = 0;
     if (nextIsbn && COVER_ENRICHMENT_ENABLED) {
       coversUpdated = db
@@ -2342,6 +2509,15 @@ async function updateIsbnForBookForAllUsers(requestUserId, referenceBookId, isbn
         `
         )
         .run(resolvedCover, referenceBook.volume, referenceBook.title, referenceBook.author).changes;
+    }
+    if (shouldSyncBookDetails) {
+      detailsUpdated = updateBookDetailsByIdentity.run(
+        resolvedFictionType || null,
+        resolvedGenre || null,
+        referenceBook.volume,
+        referenceBook.title,
+        referenceBook.author
+      ).changes;
     }
 
     const matchingBooks = selectMatchingBookResources.all(
@@ -2363,12 +2539,16 @@ async function updateIsbnForBookForAllUsers(requestUserId, referenceBookId, isbn
       usersAffected,
       booksUpdated,
       coversUpdated,
+      detailsUpdated,
       resourcesUpdated,
       volume: referenceBook.volume,
       title: referenceBook.title,
       author: referenceBook.author,
       isbn: nextIsbn,
+      fictionType: shouldSyncBookDetails ? resolvedFictionType || null : null,
+      genre: shouldSyncBookDetails ? resolvedGenre || null : null,
       thriftBooksUrl,
+      resourceLinks,
       coverUrl: resolvedCover,
       coverResolved: Boolean(resolvedCover),
       coverSyncAttempted: Boolean(nextIsbn && COVER_ENRICHMENT_ENABLED)
@@ -2421,6 +2601,60 @@ function updateThumbnailForBookForAllUsers(requestUserId, referenceBookId, thumb
       title: referenceBook.title,
       author: referenceBook.author,
       thumbnailUrl: nextThumbnail
+    };
+  });
+
+  return applyTransaction();
+}
+
+function updateBookDetailsForAllUsers(requestUserId, referenceBookId, fictionTypeInput, genreInput) {
+  const referenceBook = db
+    .prepare(
+      `
+      SELECT id, title, author, volume
+      FROM books
+      WHERE id = ? AND user_id = ?
+    `
+    )
+    .get(referenceBookId, requestUserId);
+  if (!referenceBook) {
+    return null;
+  }
+
+  const normalizedFictionType = normalizeFictionType(fictionTypeInput);
+  if (fictionTypeInput !== undefined && fictionTypeInput !== null && String(fictionTypeInput).trim() !== "") {
+    if (!FICTION_TYPE_VALUES.includes(normalizedFictionType)) {
+      return { error: "Fiction type must be fiction or nonfiction." };
+    }
+  }
+  const nextFictionType = normalizedFictionType || null;
+
+  const normalizedGenre = normalizeGenre(genreInput);
+  if (normalizedGenre && normalizedGenre.length > 80) {
+    return { error: "Genre must be 80 characters or fewer." };
+  }
+  const nextGenre = normalizedGenre || null;
+
+  const applyTransaction = db.transaction(() => {
+    const usersAffected = db.prepare("SELECT COUNT(*) AS count FROM users").get().count;
+    const booksUpdated = db
+      .prepare(
+        `
+        UPDATE books
+        SET fiction_type = ?, genre = ?
+        WHERE volume = ? AND lower(title) = lower(?) AND lower(author) = lower(?)
+      `
+      )
+      .run(nextFictionType, nextGenre, referenceBook.volume, referenceBook.title, referenceBook.author).changes;
+
+    return {
+      usersAffected,
+      booksUpdated,
+      volume: referenceBook.volume,
+      title: referenceBook.title,
+      author: referenceBook.author,
+      fictionType: nextFictionType,
+      genre: nextGenre
     };
   });
 
@@ -3370,6 +3604,38 @@ app.delete(
 );
 
 app.put(
+  "/api/admin/books/:bookId/details",
+  requireAuth,
+  requireRole("admin"),
+  adminLimiter,
+  (req, res) => {
+    const parsedParams = featureBookParamsSchema.safeParse(req.params);
+    if (!parsedParams.success) {
+      return res.status(400).json({ error: "Invalid book id." });
+    }
+    const parsedBody = bookDetailsSchema.safeParse(req.body);
+    if (!parsedBody.success) {
+      return res.status(400).json({ error: parsedBody.error.issues[0]?.message || "Invalid book details data." });
+    }
+
+    const summary = updateBookDetailsForAllUsers(
+      req.userId,
+      parsedParams.data.bookId,
+      parsedBody.data.fictionType,
+      parsedBody.data.genre
+    );
+    if (!summary) {
+      return res.status(404).json({ error: "Book not found." });
+    }
+    if (summary.error) {
+      return res.status(400).json({ error: summary.error });
+    }
+
+    return res.json({ summary });
+  }
+);
+
+app.put(
   "/api/admin/books/:bookId/isbn",
   requireAuth,
   requireRole("admin"),
@@ -3473,6 +3739,8 @@ app.post(
       volume: parsed.data.volume,
       title: parsed.data.title,
       author: parsed.data.author,
+      fictionType: parsed.data.fictionType,
+      genre: parsed.data.genre,
       month: parsed.data.month,
       year: parsed.data.year,
       isbn: parsed.data.isbn,
@@ -3686,7 +3954,7 @@ app.post(
   adminLimiter,
   (req, res) => {
     try {
-      const summary = backfillThriftBooksResourcesForExistingBooks();
+      const summary = backfillResourceLinksForExistingBooks();
       db.prepare(
         `
         INSERT INTO reading_list_uploads (id, admin_user_id, filename, mode, rows_imported, created_at)
@@ -3702,7 +3970,7 @@ app.post(
       );
       return res.json({ summary });
     } catch {
-      return res.status(500).json({ error: "Failed to backfill ThriftBooks resources." });
+      return res.status(500).json({ error: "Failed to backfill resource links." });
     }
   }
 );
